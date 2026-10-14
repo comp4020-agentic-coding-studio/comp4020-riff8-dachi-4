@@ -17,7 +17,7 @@ That first pass is a sketch. Its selection, limits, look, panel and powers are a
 
 - **Every power can be used kindly or cruelly, and it's the same power.** No good spells and bad spells. A player who wants to help and a player who wants to wreck should both find all five powers useful.
 - **"Kind" has two meanings here, and they pull apart.** Kind to the players (faster harvesting, free machines) is cruel to the world. Kind to the world (new stock, protected groves) slows the players down. Don't resolve this. It is the point of the game.
-- **A turn is a few decisions, not a spray.** Thirty seconds, a handful of acts, each one visible to everyone and signed.
+- **A turn is thirty seconds of unlimited power.** A god can act as many times as they like while they are a god: no budget, no cooldown, no cap on how many acts are in flight. The clock is the only limit. Every act is visible to everyone and signed.
 - **Nobody is surprised.** Everyone can see who the god is, what is about to land, where, and when.
 - **The record is facts, not a verdict.** No morality meter, no "good" or "evil" label anywhere. Counts and names only.
 
@@ -29,19 +29,21 @@ That first pass is a sketch. Its selection, limits, look, panel and powers are a
 - A god who disconnects is replaced at once, for the rest of that turn only.
 - A turn and a gap both carry over a world boundary; pending acts do not.
 
-## What a god has to spend
+## What a god can do
 
-Each turn starts with **4 will**. Will does not carry over. Acts cost will, land from any distance, and are refused when the god can't pay. This replaces the first pass's one-act-a-second cooldown.
+A god can use any power, any number of times, for as long as the turn lasts. Acts land from any distance. Remove the first pass's one-act-a-second cooldown and its caps of three bombs and two auras at once; the socket's existing message rate limit is the only throttle.
 
-| Power | Cost | What it does |
-| --- | --- | --- |
-| **Sow** | 1 | A full new deposit of a chosen stock on an empty tile. |
-| **Bless** | 1 | An aura, radius 4, 5 seconds. Everyone in it except the god harvests twice as fast, on top of their hand tool. |
-| **Hush** | 1 | A stillness, radius 3, 10 seconds. Nothing inside it can be harvested, by hand or by machine. |
-| **Gift** | 2 | A finished datacentre, free, wherever one would normally fit. It is owned by the god and runs like any other: it needs power, workers and coolant. |
-| **Strike** | 2 | Lands 3 seconds after it is called, radius about 2.3 tiles. Stock is destroyed, buildings fall with no refund, the ground dies. |
+| Power | What it does |
+| --- | --- |
+| **Sow** | A full new deposit of a chosen stock on an empty tile. |
+| **Bless** | An aura, radius 4, 5 seconds. Everyone in it except the god harvests twice as fast, on top of their hand tool. Overlapping auras don't stack. |
+| **Hush** | A stillness, radius 3, 10 seconds. Nothing inside it can be harvested, by hand or by machine. |
+| **Gift** | A finished datacentre, free, wherever one would normally fit. It is owned by the god and runs like any other: it needs power, workers and coolant. |
+| **Strike** | Lands 3 seconds after it is called, radius about 2.3 tiles. Stock is destroyed, buildings fall with no refund, the ground dies. |
 
-Why each one cuts both ways, which is what to preserve if you change numbers:
+With no limit on acts, thirty seconds is enough to carpet a map with Strikes or to fill it with new stock. That is intended: what a person does with that much power is the thing the game records. Make sure it holds up technically (a turn of several hundred acts must not stall the room or flood the log; fold repeated acts into one log line, such as "Ada, a god, called Lightning 14 times").
+
+Why each power cuts both ways, which is what to preserve if you change numbers:
 
 - **Sow** feeds the players and heals the map. It also puts off the world's end, and on a crowded map it can be dropped where it blocks a building someone was about to place.
 - **Bless** is a gift to the people in it and a faster death for whatever they are standing on.
@@ -49,11 +51,11 @@ Why each one cuts both ways, which is what to preserve if you change numbers:
 - **Gift** is free compute, and one more machine drinking the shared water and killing the ground under it.
 - **Strike** can end a furnace that is smoking a named grove, or erase a friend's town.
 
-Limits that keep the game sound:
+These are not limits on how often a god may act. They are the rules that keep the game sound however often a god acts:
 
 - **Sown stock is capped per world** at 20% of what that world was generated with. Past that, Sow is refused with "this world has no more to give". A world must always be able to end.
 - **A Strike never touches** the Depot, a World Engine or a player. Stock it destroys moves from `remaining` to `destroyed`; stock that is sown is added to `initial` and `remaining` together. `ledgerHolds` stays true on every tick.
-- **A Hush always ends.** At most one at a time, and it can't be renewed over the same tiles until it has lapsed for 10 seconds, so no deposit is ever out of reach for good.
+- **A Hush always ends.** A tile that has been under a Hush can't be put under another until 10 seconds after the first lapsed, so no deposit is ever out of reach for good, however many Hushes are laid.
 - **A Strike that destroys the last stock ends the world**, once, the same way a last harvest does.
 
 ## The same powers on five worlds
@@ -88,13 +90,13 @@ The god is the player's own avatar for that world, in their own colour, changed 
 
 **For everyone, while gods are on.** One compact line at the top centre of the screen:
 
-- with a god: "Ada is a god", a bar draining over the 30 seconds, and their remaining will as pips
+- with a god: "Ada is a god", and a bar draining over the 30 seconds
 - in a gap: "No god. Next in 12s."
 - It is an `aria-live` status, and it never covers the stage panel or the room panel at 1280×720.
 
 **For the god.** When your turn starts the bottom bar switches from Build to Powers and switches back when it ends. `Tab` flips between them at any time during a turn.
 
-- Five buttons, keys `1`–`5`, each showing the world's name for the power, its cost, and whether you can afford it. Sow opens a choice of the three stocks.
+- Five buttons, keys `1`–`5`, each showing the world's name for the power. Sow opens a choice of the three stocks. A chosen power stays in hand, so a god can click or hold `Enter` to use it again and again.
 - Click a tile, or press `Enter` for the tile you face. `Esc` puts the power down.
 - **The preview says what will happen in words**, before you commit: the radius on the ground, and a line such as "destroys 36 timber and 2 buildings, including Ben's Cottages. The Old Oak is inside." For Bless and Hush: who is standing in it right now.
 - A refusal is a sentence, as everywhere else in the game.
@@ -118,10 +120,10 @@ The god is the player's own avatar for that world, in their own colour, changed 
 
 The harness rules in `CLAUDE.md` all apply. The ones this work leans on hardest:
 
-- The server decides everything. A client sends "I want to Strike here"; whether they are the god, can pay, and what it destroys is worked out in `shared/sim.ts`. Validate every field.
+- The server decides everything. A client sends "I want to Strike here"; whether they are the god and what it destroys is worked out in `shared/sim.ts`. Validate every field.
 - Bump `PROTOCOL_VERSION` and `SCHEMA_VERSION`, with a migration in `server/store.ts` that loads rooms saved by `main` and by the `packs-tools-gods` branch with gods off.
 - Rooms hosted without gods must play exactly as they do now. A tool-less, god-less player's pacing does not change.
-- Add tests to `spec/sim.test.ts` for: the half-time alternation and fair order; will and its costs; each power's effect and refusal cases; the sow cap; the ledger through sowing and striking; a Strike ending a world once; Hush always lapsing; a mortal being refused every power; each world's twist you build.
+- Add tests to `spec/sim.test.ts` for: the half-time alternation and fair order; a god acting many times in one tick and several hundred times in one turn with the ledger intact; each power's effect and refusal cases; the sow cap; the ledger through sowing and striking; a Strike ending a world once; Hush always lapsing; a mortal being refused every power; each world's twist you build.
 - Update `README.md`, `docs/DESIGN.md` and `docs/DECISIONS.md` in the same commits as the behaviour.
 - `pnpm check` passes before each commit, and `main` stays deployable throughout.
 
@@ -136,7 +138,7 @@ The harness rules in `CLAUDE.md` all apply. The ones this work leans on hardest:
 
 Build in this order, and stop at a point where `main` is whole:
 
-1. Alternation, fair order, will, and the five powers with their limits, tested.
+1. Alternation, fair order, and the five powers, unlimited within a turn, with the soundness rules, tested.
 2. The top-centre line, the Powers bar and the worded previews.
 3. The god's look: size, hover, halo, the word.
 4. The record: roster numbers, the Sown column, the ending lines.

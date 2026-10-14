@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BUILDINGS, FAMILIES, STAGES } from "../shared/content.ts";
+import { AURA_TICKS, BOMB_FUSE_TICKS, BUILDINGS, FAMILIES, GOD_TERM_TICKS, HARVEST_COOLDOWN_TICKS, MAX_BOMBS, STAGES, TOOL_TIERS, toolCost } from "../shared/content.ts";
 import type { RoomState } from "../shared/protocol.ts";
 import { applyCommand, createRoom, join, leave, ledgerHolds, newChanges, tick, totalRemaining, bundleOk, type Changes } from "../shared/sim.ts";
 
@@ -70,6 +70,7 @@ describe("resource accounting", () => {
       if (s.gen !== before) boundaries.push(s.gen);
       expect(ledgerHolds(s)).toBe(true);
       expect(bundleOk(s.inventory)).toBe(true);
+      for (const p of Object.values(s.players)) expect(bundleOk(p.pack)).toBe(true);
     }
     expect(s.phase.k).toBe("ended");
     // exactly one transition per exhausted stage
@@ -354,5 +355,307 @@ describe("stage transitions", () => {
     expect(restored.reserve).toBe(s.history.at(-1)!.ledger.matter.extracted * 4);
     expect(JSON.stringify(restored.tiles)).toBe(JSON.stringify(s.tiles));
     expect(restored.history).toHaveLength(3);
+  });
+});
+
+describe("packs and tools", () => {
+  const deposit = (s: RoomState, family: "matter" | "mineral" | "coolant"): [number, number] => at(s, s.tiles.findIndex((t) => t.d === family && t.amt > 0));
+
+  it("puts a hand harvest in the harvester's own pack, not the stockpile or anyone else's", () => {
+    const { s, ch } = room("normal", ["a", "b"]);
+    const [x, y] = deposit(s, "matter");
+    stand(s, "a", x, y);
+    expect(applyCommand(s, "a", id(), s.gen, { k: "harvest", x, y }, ch).ok).toBe(true);
+    expect(s.players.a.pack.matter).toBe(1);
+    expect(s.players.b.pack.matter).toBe(0);
+    expect(s.inventory.matter).toBe(0);
+    expect(ledgerHolds(s)).toBe(true);
+  });
+
+  it("moves a whole pack into the stockpile on deposit, and refuses an empty one", () => {
+    const { s, ch } = room("normal");
+    expect(applyCommand(s, "a", id(), s.gen, { k: "deposit" }, ch).ok).toBe(false);
+    s.players.a.pack = { matter: 5, mineral: 3, coolant: 0 };
+    s.inventory = { matter: 1, mineral: 0, coolant: 2 };
+    expect(applyCommand(s, "a", id(), s.gen, { k: "deposit" }, ch).ok).toBe(true);
+    expect(s.players.a.pack).toEqual({ matter: 0, mineral: 0, coolant: 0 });
+    expect(s.inventory).toEqual({ matter: 6, mineral: 3, coolant: 2 });
+  });
+
+  it("builds from the builder's pack first and the stockpile for the rest, never from another pack", () => {
+    const { s, ch } = room("normal", ["a", "b"]);
+    const [x, y] = freeTile(s, 2);
+    stand(s, "a", x, y);
+    const cost = BUILDINGS.city.cost; // 12 matter, 6 mineral
+    s.players.b.pack = { matter: 100, mineral: 100, coolant: 0 };
+    expect(applyCommand(s, "a", id(), s.gen, { k: "build", x, y, type: "city" }, ch).ok).toBe(false);
+    s.players.a.pack = { matter: 5, mineral: 20, coolant: 0 };
+    s.inventory = { matter: 10, mineral: 10, coolant: 0 };
+    expect(applyCommand(s, "a", id(), s.gen, { k: "build", x, y, type: "city" }, ch).ok).toBe(true);
+    expect(s.players.a.pack).toEqual({ matter: 0, mineral: 20 - cost.mineral!, coolant: 0 });
+    expect(s.inventory).toEqual({ matter: 10 - (cost.matter! - 5), mineral: 10, coolant: 0 });
+    expect(s.players.b.pack.matter).toBe(100);
+  });
+
+  it("crafts a rough tool from the crafter's pack alone, and it shortens only that family's cooldown", () => {
+    const { s, ch } = room("normal");
+    const cost = toolCost("matter", 1);
+    s.inventory = { matter: 100, mineral: 100, coolant: 100 }; // the stockpile doesn't pay for tools
+    expect(applyCommand(s, "a", id(), s.gen, { k: "craft", tool: "matter" }, ch).ok).toBe(false);
+    s.players.a.pack = { ...cost };
+    expect(applyCommand(s, "a", id(), s.gen, { k: "craft", tool: "matter" }, ch).ok).toBe(true);
+    expect(s.players.a.tools).toEqual({ matter: 1, mineral: 0, coolant: 0 });
+    expect(s.players.a.pack).toEqual({ matter: 0, mineral: 0, coolant: 0 });
+    expect(s.inventory.matter).toBe(100);
+
+    const [x, y] = deposit(s, "matter");
+    stand(s, "a", x, y);
+    applyCommand(s, "a", id(), s.gen, { k: "harvest", x, y }, ch);
+    expect(s.players.a.nextHarvest - s.tick).toBe(TOOL_TIERS[1].cooldown);
+    expect(TOOL_TIERS[1].cooldown).toBeLessThan(HARVEST_COOLDOWN_TICKS);
+    for (let k = 0; k < TOOL_TIERS[1].cooldown - 1; k++) tick(s, ch);
+    expect(applyCommand(s, "a", id(), s.gen, { k: "harvest", x, y }, ch)).toEqual({ ok: false, reason: "too fast" });
+    tick(s, ch);
+    expect(applyCommand(s, "a", id(), s.gen, { k: "harvest", x, y }, ch).ok).toBe(true);
+    expect(s.players.a.pack.matter).toBe(2); // a quicker swing, the same bite
+
+    const [mx, my] = deposit(s, "mineral");
+    stand(s, "a", mx, my);
+    s.players.a.nextHarvest = 0;
+    applyCommand(s, "a", id(), s.gen, { k: "harvest", x: mx, y: my }, ch);
+    expect(s.players.a.nextHarvest - s.tick).toBe(HARVEST_COOLDOWN_TICKS);
+  });
+
+  it("makes a fine tool only beside finished homes, and stops at the top tier", () => {
+    const { s, ch } = room("normal");
+    s.players.a.tools.mineral = 1;
+    s.players.a.pack = { matter: 100, mineral: 100, coolant: 100 };
+    const far = applyCommand(s, "a", id(), s.gen, { k: "craft", tool: "mineral" }, ch);
+    expect(far.ok).toBe(false);
+    const [x, y] = freeTile(s, 2);
+    stand(s, "a", x, y);
+    expect(applyCommand(s, "a", id(), s.gen, { k: "build", x, y, type: "city" }, ch).ok).toBe(true);
+    // a building site is not a workbench yet
+    expect(applyCommand(s, "a", id(), s.gen, { k: "craft", tool: "mineral" }, ch).ok).toBe(false);
+    s.buildings.find((b) => b.type === "city")!.work = BUILDINGS.city.build * 10;
+    const before = { ...s.players.a.pack };
+    expect(applyCommand(s, "a", id(), s.gen, { k: "craft", tool: "mineral" }, ch).ok).toBe(true);
+    expect(s.players.a.tools.mineral).toBe(2);
+    const cost = toolCost("mineral", 2);
+    for (const f of FAMILIES) expect(s.players.a.pack[f]).toBe(before[f] - cost[f]);
+    expect(applyCommand(s, "a", id(), s.gen, { k: "craft", tool: "mineral" }, ch).ok).toBe(false);
+    expect(bundleOk(s.players.a.pack)).toBe(true);
+  });
+
+  it("refuses a tool that doesn't exist", () => {
+    const { s, ch } = room("normal");
+    s.players.a.pack = { matter: 100, mineral: 100, coolant: 100 };
+    for (const tool of ["gold", "__proto__", 3, null]) expect(applyCommand(s, "a", id(), s.gen, { k: "craft", tool } as never, ch).ok).toBe(false);
+  });
+
+  it("empties packs at a world boundary and keeps the tools", () => {
+    const { s, ch } = room();
+    s.players.a.tools = { matter: 2, mineral: 1, coolant: 0 };
+    while (s.stage === 0) {
+      if (s.phase.k === "play") harvestBot(s, ch, "a");
+      tick(s, ch);
+    }
+    expect(s.players.a.pack).toEqual({ matter: 0, mineral: 0, coolant: 0 });
+    expect(s.players.a.tools).toEqual({ matter: 2, mineral: 1, coolant: 0 });
+  });
+});
+
+describe("gods", () => {
+  function godRoom(players = ["a", "b"]): { s: RoomState; ch: Changes } {
+    const s = createRoom("GODSS", 7, "normal", true);
+    const ch = newChanges();
+    for (const p of players) join(s, p, `tok-${p}`, p.toUpperCase(), ch);
+    tick(s, ch);
+    return { s, ch };
+  }
+  const mortal = (s: RoomState): string => Object.keys(s.players).find((id) => id !== s.god.id)!;
+  const act = (s: RoomState, ch: Changes, pid: string, c: object) => {
+    s.god.ready = 0;
+    return applyCommand(s, pid, id(), s.gen, c as never, ch);
+  };
+
+  it("has no god unless the room was hosted with them", () => {
+    const { s, ch } = room("normal");
+    for (let k = 0; k < GOD_TERM_TICKS + 5; k++) tick(s, ch);
+    expect(s.god.id).toBeNull();
+    expect(applyCommand(s, "a", id(), s.gen, { k: "god", power: "bomb", x: 3, y: 3 }, ch).ok).toBe(false);
+  });
+
+  it("chooses a connected player, and someone else every 30 seconds", () => {
+    const { s, ch } = godRoom(["a", "b", "c"]);
+    const seen = new Set<string>();
+    for (let turn = 0; turn < 12; turn++) {
+      const was = s.god.id!;
+      expect(s.players[was].connected).toBe(true);
+      seen.add(was);
+      for (let k = 0; k < GOD_TERM_TICKS - 1; k++) tick(s, ch);
+      expect(s.god.id).toBe(was);
+      tick(s, ch);
+      expect(s.god.id).not.toBe(was);
+    }
+    expect(seen.size).toBe(3);
+  });
+
+  it("passes godhood on at once when the god leaves, and keeps a lone player as god", () => {
+    const { s, ch } = godRoom();
+    const was = s.god.id!;
+    leave(s, was, ch);
+    tick(s, ch);
+    expect(s.god.id).toBe(mortal({ ...s, god: { ...s.god, id: was } }));
+    const only = s.god.id!;
+    for (let k = 0; k < GOD_TERM_TICKS + 2; k++) tick(s, ch);
+    expect(s.god.id).toBe(only);
+  });
+
+  it("lets only the host switch gods off, and a switched-off room has no god and no powers", () => {
+    const { s, ch } = godRoom();
+    expect(s.hostId).toBe("a");
+    expect(applyCommand(s, "b", id(), s.gen, { k: "gods", on: false }, ch).ok).toBe(false);
+    const was = s.god.id!;
+    expect(applyCommand(s, "a", id(), s.gen, { k: "gods", on: false }, ch).ok).toBe(true);
+    expect(s.god).toMatchObject({ on: false, id: null });
+    expect(act(s, ch, was, { k: "god", power: "bomb", x: 3, y: 3 }).ok).toBe(false);
+    for (let k = 0; k < GOD_TERM_TICKS + 2; k++) tick(s, ch);
+    expect(s.god.id).toBeNull();
+    expect(applyCommand(s, "a", id(), s.gen, { k: "gods", on: true }, ch).ok).toBe(true);
+    tick(s, ch);
+    expect(s.god.id).not.toBeNull();
+  });
+
+  it("refuses every power to a mortal, and malformed ones to the god", () => {
+    const { s, ch } = godRoom();
+    const [x, y] = freeTile(s, 2);
+    for (const power of ["datacentre", "bomb", "aura"]) expect(act(s, ch, mortal(s), { k: "god", power, x, y }).ok).toBe(false);
+    expect(act(s, ch, mortal(s), { k: "god", power: "plant", x, y, family: "matter" }).ok).toBe(false);
+    for (const c of [{ power: "smite", x, y }, { power: "bomb", x: -1, y }, { power: "bomb", x: 1.5, y }, { power: "plant", x, y }, { power: "plant", x, y, family: "gold" }])
+      expect(act(s, ch, s.god.id!, { k: "god", ...c }).ok).toBe(false);
+    expect(ledgerHolds(s)).toBe(true);
+  });
+
+  it("raises a finished datacentre for nothing, from any distance, but not on a deposit", () => {
+    const { s, ch } = godRoom();
+    const god = s.god.id!;
+    const [x, y] = freeTile(s, 2);
+    stand(s, god, 0, 0);
+    expect(act(s, ch, god, { k: "god", power: "datacentre", x, y }).ok).toBe(true);
+    const b = s.buildings.find((q) => q.type === "datacentre")!;
+    expect(b.work).toBe(BUILDINGS.datacentre.build * 10);
+    expect(b.owner).toBe(god);
+    expect(s.inventory).toEqual({ matter: 0, mineral: 0, coolant: 0 });
+    const [dx, dy] = at(s, depositIdx(s));
+    expect(act(s, ch, god, { k: "god", power: "datacentre", x: dx, y: dy }).ok).toBe(false);
+  });
+
+  it("plants new stock on the books, and not where something grows or stands", () => {
+    const { s, ch } = godRoom();
+    const god = s.god.id!;
+    const [x, y] = freeTile(s);
+    const before = { ...s.ledger.mineral };
+    expect(act(s, ch, god, { k: "god", power: "plant", x, y, family: "mineral" }).ok).toBe(true);
+    const n = STAGES[0].families.mineral.perTile;
+    expect(s.tiles[y * s.w + x]).toMatchObject({ d: "mineral", amt: n, init: n });
+    expect(s.ledger.mineral.initial).toBe(before.initial + n);
+    expect(s.ledger.mineral.remaining).toBe(before.remaining + n);
+    expect(ledgerHolds(s)).toBe(true);
+    expect(act(s, ch, god, { k: "god", power: "plant", x, y, family: "matter" }).ok).toBe(false);
+    // and it can be harvested like any other
+    const m = mortal(s);
+    stand(s, m, x, y);
+    expect(applyCommand(s, m, id(), s.gen, { k: "harvest", x, y }, ch).ok).toBe(true);
+    expect(s.players[m].pack.mineral).toBe(1);
+    expect(ledgerHolds(s)).toBe(true);
+  });
+
+  it("a bomb goes off after its fuse, destroying stock on the books and buildings, and at most three tick at once", () => {
+    const { s, ch } = godRoom();
+    const god = s.god.id!;
+    const i = depositIdx(s);
+    const [x, y] = at(s, i);
+    const family = s.tiles[i].d!;
+    const [bx, by] = freeTile(s);
+    stand(s, god, bx, by);
+    s.players[god].pack = { matter: 50, mineral: 50, coolant: 50 };
+    expect(applyCommand(s, god, id(), s.gen, { k: "build", x: bx, y: by, type: "plaza" }, ch).ok).toBe(true);
+    expect(act(s, ch, god, { k: "god", power: "bomb", x, y }).ok).toBe(true);
+    expect(act(s, ch, god, { k: "god", power: "bomb", x: bx, y: by }).ok).toBe(true);
+    expect(act(s, ch, god, { k: "god", power: "bomb", x: 0, y: 0 }).ok).toBe(true);
+    expect(s.bombs).toHaveLength(MAX_BOMBS);
+    expect(act(s, ch, god, { k: "god", power: "bomb", x: 1, y: 1 }).ok).toBe(false);
+    const destroyed = s.ledger[family].destroyed;
+    for (let k = 0; k < BOMB_FUSE_TICKS - 1; k++) tick(s, ch);
+    expect(s.tiles[i].amt).toBeGreaterThan(0);
+    ch.blasts.length = 0;
+    tick(s, ch);
+    expect(s.bombs).toHaveLength(0);
+    expect(ch.blasts).toHaveLength(3);
+    expect(s.tiles[i].amt).toBe(0);
+    expect(s.ledger[family].destroyed).toBeGreaterThan(destroyed);
+    expect(s.buildings.some((b) => b.type === "plaza")).toBe(false);
+    expect(s.tiles[by * s.w + bx].b).toBe(0);
+    expect(ledgerHolds(s)).toBe(true);
+  });
+
+  it("a bomb can't take down the Depot, and bombing the last stock ends the world once", () => {
+    const { s, ch } = godRoom();
+    while (STAGES[s.stage].id !== "system") {
+      if (s.phase.k === "play") for (const t of s.tiles) if (t.d && t.amt > 1) {
+        s.ledger[t.d].remaining -= t.amt - 1;
+        s.ledger[t.d].destroyed += t.amt - 1;
+        t.amt = 1;
+      }
+      if (s.phase.k === "play") harvestBot(s, ch, "a");
+      tick(s, ch);
+    }
+    const depot = s.buildings.find((b) => b.type === "depot")!;
+    expect(act(s, ch, s.god.id!, { k: "god", power: "bomb", x: depot.x, y: depot.y }).ok).toBe(true);
+    for (let k = 0; k <= BOMB_FUSE_TICKS; k++) tick(s, ch);
+    expect(s.buildings.some((b) => b.type === "depot")).toBe(true);
+    // leave one deposit, and bomb it
+    const last = depositIdx(s);
+    s.tiles.forEach((t, i) => {
+      if (i === last || !t.d || t.amt === 0) return;
+      s.ledger[t.d].remaining -= t.amt;
+      s.ledger[t.d].destroyed += t.amt;
+      t.amt = 0;
+    });
+    const [x, y] = at(s, last);
+    const stages = s.history.length;
+    expect(act(s, ch, s.god.id!, { k: "god", power: "bomb", x, y }).ok).toBe(true);
+    for (let k = 0; k <= BOMB_FUSE_TICKS; k++) tick(s, ch);
+    expect(s.phase.k).toBe("transition");
+    expect(s.history).toHaveLength(stages + 1);
+    expect(ledgerHolds(s)).toBe(true);
+  });
+
+  it("an aura doubles a mortal's harvesting inside it for five seconds, and never the god's", () => {
+    const { s, ch } = godRoom();
+    const god = s.god.id!;
+    const m = mortal(s);
+    const [x, y] = at(s, depositIdx(s));
+    stand(s, m, x, y);
+    stand(s, god, x, y);
+    expect(act(s, ch, god, { k: "god", power: "aura", x, y }).ok).toBe(true);
+    applyCommand(s, m, id(), s.gen, { k: "harvest", x, y }, ch);
+    expect(s.players[m].nextHarvest - s.tick).toBe(HARVEST_COOLDOWN_TICKS / 2);
+    applyCommand(s, god, id(), s.gen, { k: "harvest", x, y }, ch);
+    expect(s.players[god].nextHarvest - s.tick).toBe(HARVEST_COOLDOWN_TICKS);
+    // outside it, nothing changes
+    const far = s.tiles.findIndex((t, i) => t.d && t.amt > 0 && Math.hypot((i % s.w) - x, Math.floor(i / s.w) - y) > 8);
+    stand(s, m, ...at(s, far));
+    s.players[m].nextHarvest = 0;
+    applyCommand(s, m, id(), s.gen, { k: "harvest", x: at(s, far)[0], y: at(s, far)[1] }, ch);
+    expect(s.players[m].nextHarvest - s.tick).toBe(HARVEST_COOLDOWN_TICKS);
+    // and it fades
+    for (let k = 0; k < AURA_TICKS; k++) tick(s, ch);
+    expect(s.auras).toHaveLength(0);
+    stand(s, m, x, y);
+    s.players[m].nextHarvest = 0;
+    applyCommand(s, m, id(), s.gen, { k: "harvest", x, y }, ch);
+    expect(s.players[m].nextHarvest - s.tick).toBe(HARVEST_COOLDOWN_TICKS);
   });
 });

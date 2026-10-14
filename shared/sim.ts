@@ -3,14 +3,25 @@
 // server owns the only live copy of each room and calls these in order: one
 // command or one tick at a time, which is what serialises every mutation.
 import {
+  AURA_MIN_COOLDOWN,
+  AURA_RADIUS,
+  AURA_SPEEDUP,
+  AURA_TICKS,
+  BENCH_RANGE,
+  BOMB_FUSE_TICKS,
+  BOMB_RADIUS,
   BUILDINGS,
   BUILD_RANGE,
   EMOTES,
   FAMILIES,
+  GOD_COOLDOWN_TICKS,
+  GOD_TERM_TICKS,
   HARVEST_COOLDOWN_TICKS,
   HARVEST_RANGE,
   HEAT_LIMIT,
   MARKS_PER_PLAYER,
+  MAX_AURAS,
+  MAX_BOMBS,
   MAX_IDENTITIES,
   MAX_PLAYERS,
   PACES,
@@ -19,15 +30,19 @@ import {
   STAGES,
   SUN_TO_RESERVE,
   TICK_MS,
+  TOOL_TIERS,
   buildingName,
+  harvestCooldown,
+  toolCost,
+  toolName,
   type Bundle,
   type BuildingType,
   type Family,
   type Pace,
 } from "./content.ts";
-import type { Building, Command, Ledger, Player, RoomState, StageSummary, Tile } from "./protocol.ts";
+import type { Bomb, Building, Command, Ledger, Player, RoomState, StageSummary, Tile } from "./protocol.ts";
 import { SCHEMA_VERSION } from "./protocol.ts";
-import { generateStage } from "./worldgen.ts";
+import { generateStage, rng } from "./worldgen.ts";
 
 /** What changed during one call: the server turns this into a delta. */
 export interface Changes {
@@ -36,15 +51,19 @@ export interface Changes {
   removed: number[];
   meta: boolean;
   log: number;
+  /** where bombs went off: [x, y] */
+  blasts: [number, number][];
   /** a stage boundary or the ending: save now, then broadcast a fresh snapshot */
   boundary: boolean;
 }
 
-export const newChanges = (): Changes => ({ tiles: new Set(), buildings: new Set(), removed: [], meta: false, log: 0, boundary: false });
+export const newChanges = (): Changes => ({ tiles: new Set(), buildings: new Set(), removed: [], meta: false, log: 0, blasts: [], boundary: false });
 
 export type Result = { ok: true } | { ok: false; reason: string };
 const no = (reason: string): Result => ({ ok: false, reason });
 const OK: Result = { ok: true };
+
+export const emptyBundle = (): Bundle => ({ matter: 0, mineral: 0, coolant: 0 });
 
 const emptyLedger = (): Ledger =>
   Object.fromEntries(FAMILIES.map((f) => [f, { initial: 0, remaining: 0, extracted: 0, destroyed: 0 }])) as Ledger;
@@ -82,7 +101,7 @@ export const averageLife = (s: Pick<RoomState, "tiles" | "ledger">): number => {
   return Math.round(land.reduce((a, t) => a + effectiveLife(t, cap), 0) / Math.max(1, land.length));
 };
 
-export function createRoom(code: string, seed: number, pace: Pace): RoomState {
+export function createRoom(code: string, seed: number, pace: Pace, gods = false): RoomState {
   const g = generateStage(seed, 0);
   const s: RoomState = {
     v: SCHEMA_VERSION,
@@ -107,6 +126,9 @@ export function createRoom(code: string, seed: number, pace: Pace): RoomState {
     econ: { energySupply: 0, energyUsed: 0, computeSupply: 0, computeUsed: 0, workersSupply: 0, workersUsed: 0 },
     heat: 0,
     reserve: 0,
+    god: { on: gods, id: null, until: 0, ready: 0, made: 0 },
+    bombs: [],
+    auras: [],
     history: [],
     archive: [],
     players: {},
@@ -185,6 +207,8 @@ export function join(s: RoomState, id: string, token: string, name: string, ch: 
     nextHarvest: 0,
     nextEmote: 0,
     marks: 0,
+    pack: emptyBundle(),
+    tools: emptyBundle(),
     stats: { harvested: 0, built: 0, helped: 0 },
   };
   s.players[id] = p;
@@ -233,7 +257,7 @@ const complete = (b: Building): boolean => b.work >= BUILDINGS[b.type].build * 1
 export const isHost = (s: RoomState, id: string): boolean => s.hostId === id;
 
 /** Why a building can't go here, or null if it can. Shared by server and the ghost preview. */
-export function placementProblem(s: RoomState, type: BuildingType, x: number, y: number, p?: Player): string | null {
+export function placementProblem(s: RoomState, type: BuildingType, x: number, y: number, p?: Player, free = false): string | null {
   const st = STAGES[s.stage];
   if (!st.buildings.includes(type)) return `nothing like that can be built on ${st.name}`;
   const def = BUILDINGS[type];
@@ -247,10 +271,46 @@ export function placementProblem(s: RoomState, type: BuildingType, x: number, y:
     if (t.t === 2 && type !== "relay") return "nothing to build on: only relays float in open space";
   }
   if (p && !near(p, x + (def.size - 1) / 2, y + (def.size - 1) / 2, BUILD_RANGE)) return "too far away: walk closer";
-  for (const f of FAMILIES) {
+  // a builder pays from their own pack first, and the stockpile covers the rest
+  if (!free) for (const f of FAMILIES) {
     const need = def.cost[f] ?? 0;
-    if (s.inventory[f] < need) return `needs ${need} ${st.families[f].label} (have ${s.inventory[f]})`;
+    const have = s.inventory[f] + (p?.pack[f] ?? 0);
+    if (have < need) return `needs ${need} ${st.families[f].label} (have ${have})`;
   }
+  return null;
+}
+
+/** Ticks until this player may harvest this family again: their tool, and an aura if a god laid one over them. */
+export function harvestTicks(s: Pick<RoomState, "god" | "auras" | "tick">, p: Pick<Player, "id" | "x" | "y" | "tools">, family: Family): number {
+  const base = harvestCooldown(p.tools, family);
+  const blessed = p.id !== s.god.id && s.auras.some((a) => a.until > s.tick && Math.hypot(p.x - a.x, p.y - a.y) <= AURA_RADIUS);
+  return blessed ? Math.max(AURA_MIN_COOLDOWN, Math.floor(base / AURA_SPEEDUP)) : base;
+}
+
+/** Why this tile can't be planted, or null if it can. Shared by server and the ghost preview. */
+export function plantProblem(s: Pick<RoomState, "tiles" | "w">, x: number, y: number): string | null {
+  const t = x >= 0 && y >= 0 && x < s.w && y < s.w ? s.tiles[y * s.w + x] : undefined;
+  if (!t) return "off the edge of the map";
+  if (t.b) return "something is built here";
+  if (t.d && t.amt > 0) return "something already grows here";
+  if (t.t === 3) return "not on the star itself";
+  if (t.t === 4) return "not on a spent world";
+  return null;
+}
+
+/** A finished home within reach: its workbench is where fine tools are made. */
+export const atBench = (s: Pick<RoomState, "buildings">, p: Pick<Player, "x" | "y">): boolean =>
+  s.buildings.some((b) => b.type === "city" && complete(b) && Math.hypot(p.x - centre(b)[0], p.y - centre(b)[1]) <= BENCH_RANGE);
+
+/** Why this player can't make the next tier of a tool right now, or null if they can. Shared by server and HUD. */
+export function craftProblem(s: Pick<RoomState, "buildings" | "stage">, p: Player, family: Family): string | null {
+  const st = STAGES[s.stage];
+  const tier = p.tools[family] + 1;
+  const def = TOOL_TIERS[tier];
+  if (!def) return `your ${toolName(family, p.tools[family])} is as good as they get`;
+  if (def.bench && !atBench(s, p)) return `a ${toolName(family, tier)} needs a workbench: stand beside finished ${buildingName(st, "city")}`;
+  const cost = toolCost(family, tier);
+  for (const f of FAMILIES) if (p.pack[f] < cost[f]) return `needs ${cost[f]} ${st.families[f].label} in your pack (you carry ${p.pack[f]})`;
   return null;
 }
 
@@ -262,14 +322,15 @@ function remember(s: RoomState, tile: Tile, fate: string, ch: Changes): void {
   ch.meta = true;
 }
 
-function takeFrom(s: RoomState, idx: number, amount: number, ch: Changes): number {
+/** Take stock off a tile and put it in `into`: a player's pack, or the stockpile for machines. */
+function takeFrom(s: RoomState, idx: number, amount: number, into: Bundle, ch: Changes): number {
   const tile = s.tiles[idx];
   if (!tile.d || tile.amt <= 0) return 0;
   const took = Math.min(amount, tile.amt);
   tile.amt -= took;
   s.ledger[tile.d].remaining -= took;
   s.ledger[tile.d].extracted += took;
-  s.inventory[tile.d] += took;
+  into[tile.d] += took;
   tile.life = Math.min(tile.life, Math.round((tile.amt / tile.init) * 60));
   ch.tiles.add(idx);
   ch.meta = true;
@@ -342,10 +403,11 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
         return OK;
       }
       if (!tile.d || tile.amt <= 0) return no("nothing to harvest there");
-      const took = takeFrom(s, idx, PACES[s.pace].harvestYield, ch);
+      const family = tile.d;
+      const took = takeFrom(s, idx, PACES[s.pace].harvestYield, p.pack, ch);
       withdraw(s, p, ch);
       p.stats.harvested += took;
-      p.nextHarvest = s.tick + HARVEST_COOLDOWN_TICKS;
+      p.nextHarvest = s.tick + harvestTicks(s, p, family);
       p.act = { k: "harvest", until: s.tick + 4 };
       p.facing = facingTo(c.x - p.x, c.y - p.y, p.facing);
       checkExhausted(s, ch);
@@ -357,7 +419,12 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       if (problem) return no(problem);
       const def = BUILDINGS[c.type];
       // payment and occupancy commit together: nothing between them can fail
-      for (const f of FAMILIES) s.inventory[f] -= def.cost[f] ?? 0;
+      for (const f of FAMILIES) {
+        const need = def.cost[f] ?? 0;
+        const mine = Math.min(need, p.pack[f]);
+        p.pack[f] -= mine;
+        s.inventory[f] -= need - mine;
+      }
       const b: Building = { id: s.nextBuildingId++, type: c.type, x: c.x, y: c.y, owner: pid, work: 0, status: "under construction" };
       s.buildings.push(b);
       for (const [fx, fy] of footprint(b)) {
@@ -427,6 +494,99 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
       log(s, ch, `${p.name} named a place ${name}.`);
       return OK;
     }
+    case "craft": {
+      if (typeof c.tool !== "string" || !(FAMILIES as readonly string[]).includes(c.tool)) return no("no such tool");
+      const problem = craftProblem(s, p, c.tool);
+      if (problem) return no(problem);
+      const tier = p.tools[c.tool] + 1;
+      const cost = toolCost(c.tool, tier);
+      for (const f of FAMILIES) p.pack[f] -= cost[f];
+      p.tools[c.tool] = tier;
+      withdraw(s, p, ch);
+      p.act = { k: "build", until: s.tick + 6 };
+      log(s, ch, `${p.name} made a ${toolName(c.tool, tier)}.`);
+      return OK;
+    }
+    case "deposit": {
+      if (FAMILIES.every((f) => p.pack[f] === 0)) return no("your pack is empty");
+      for (const f of FAMILIES) {
+        s.inventory[f] += p.pack[f];
+        p.pack[f] = 0;
+      }
+      ch.meta = true;
+      return OK;
+    }
+    case "gods": {
+      if (typeof c.on !== "boolean") return no("malformed switch");
+      if (!isHost(s, pid)) return no("only the host can turn gods on or off");
+      if (s.god.on === c.on) return OK;
+      s.god.on = c.on;
+      s.god.id = null;
+      s.god.until = 0;
+      log(s, ch, c.on ? `${p.name} let the gods in.` : `${p.name} sent the gods away.`);
+      ch.meta = true;
+      return OK;
+    }
+    case "god": {
+      if (!s.god.on || s.god.id !== pid) return no("you aren't a god right now");
+      if (!isInt(c.x) || !isInt(c.y) || !inBounds(s, c.x, c.y)) return no("off the map");
+      if (s.tick < s.god.ready) return no("too fast");
+      const idx = c.y * s.w + c.x;
+      const tile = s.tiles[idx];
+      switch (c.power) {
+        case "datacentre": {
+          // free, finished and from any distance; the ground rules still hold
+          const problem = placementProblem(s, "datacentre", c.x, c.y, undefined, true);
+          if (problem) return no(problem);
+          const b: Building = { id: s.nextBuildingId++, type: "datacentre", x: c.x, y: c.y, owner: pid, work: BUILDINGS.datacentre.build * 10, status: "starting up" };
+          s.buildings.push(b);
+          for (const [fx, fy] of footprint(b)) {
+            const i = fy * s.w + fx;
+            s.tiles[i].b = b.id;
+            s.tiles[i].life = Math.min(s.tiles[i].life, 15);
+            ch.tiles.add(i);
+            remember(s, s.tiles[i], `became a ${buildingName(st, "datacentre")}`, ch);
+          }
+          ch.buildings.add(b.id);
+          p.stats.built++;
+          log(s, ch, `${p.name}, a god, willed a ${buildingName(st, "datacentre")} into being.`);
+          break;
+        }
+        case "bomb": {
+          if (s.bombs.length >= MAX_BOMBS) return no(`only ${MAX_BOMBS} bombs can be ticking at once`);
+          s.bombs.push({ id: ++s.god.made, x: c.x, y: c.y, at: s.tick + BOMB_FUSE_TICKS, by: p.name });
+          log(s, ch, `${p.name}, a god, put a bomb down.`);
+          break;
+        }
+        case "plant": {
+          if (typeof c.family !== "string" || !(FAMILIES as readonly string[]).includes(c.family)) return no("plant what?");
+          const problem = plantProblem(s, c.x, c.y);
+          if (problem) return no(problem);
+          // new natural stock goes on the books as it appears: initial and remaining grow together
+          const n = st.families[c.family].perTile;
+          tile.d = c.family;
+          tile.amt = tile.init = n;
+          if (tile.t === 2) tile.t = c.family === "coolant" ? 1 : 0;
+          tile.life = Math.max(tile.life, 60);
+          s.ledger[c.family].initial += n;
+          s.ledger[c.family].remaining += n;
+          ch.tiles.add(idx);
+          break;
+        }
+        case "aura": {
+          s.auras = s.auras.filter((a) => a.until > s.tick);
+          if (s.auras.length >= MAX_AURAS) return no(`only ${MAX_AURAS} auras can shine at once`);
+          s.auras.push({ id: ++s.god.made, x: c.x, y: c.y, until: s.tick + AURA_TICKS });
+          break;
+        }
+        default:
+          return no("no such power");
+      }
+      s.god.ready = s.tick + GOD_COOLDOWN_TICKS;
+      p.act = { k: "build", until: s.tick + 6 };
+      ch.meta = true;
+      return OK;
+    }
     case "stop": {
       if (STAGES[s.stage].id !== "universe") return no("there's always another world, until the last one");
       if (typeof c.on !== "boolean") return no("malformed vote");
@@ -442,6 +602,71 @@ function mutate(s: RoomState, p: Player, c: Exclude<Command, { k: "move" }>, ch:
     }
     default:
       return no("unknown command");
+  }
+}
+
+/** Choose the next god from whoever is here: someone else if there is anyone else. */
+function crown(s: RoomState, ch: Changes): void {
+  const here = Object.values(s.players)
+    .filter((p) => p.connected)
+    .sort((a, b) => a.joinedTick - b.joinedTick || (a.id < b.id ? -1 : 1));
+  const others = here.length > 1 ? here.filter((p) => p.id !== s.god.id) : here;
+  const next = others.length ? others[Math.floor(rng(s.seed + s.tick * 2654435761)() * others.length)] : null;
+  if (next && next.id !== s.god.id) log(s, ch, `${next.name} is a god for ${Math.round((GOD_TERM_TICKS * TICK_MS) / 1000)} seconds.`);
+  s.god.id = next ? next.id : null;
+  s.god.until = s.tick + GOD_TERM_TICKS;
+  s.god.ready = 0;
+  ch.meta = true;
+}
+
+/** A bomb goes off: stock in reach is destroyed (on the books), buildings fall, the ground dies. */
+function explode(s: RoomState, bomb: Bomb, ch: Changes): void {
+  const st = STAGES[s.stage];
+  const fallen = new Set<number>();
+  for (let y = Math.floor(bomb.y - BOMB_RADIUS); y <= Math.ceil(bomb.y + BOMB_RADIUS); y++)
+    for (let x = Math.floor(bomb.x - BOMB_RADIUS); x <= Math.ceil(bomb.x + BOMB_RADIUS); x++) {
+      const tile = tileAt(s, x, y);
+      if (!tile || Math.hypot(x - bomb.x, y - bomb.y) > BOMB_RADIUS) continue;
+      if (tile.d && tile.amt > 0) {
+        s.ledger[tile.d].remaining -= tile.amt;
+        s.ledger[tile.d].destroyed += tile.amt;
+        tile.amt = 0;
+      }
+      remember(s, tile, "was bombed flat by a god", ch);
+      if (tile.t !== 2) tile.life = 0;
+      if (tile.b) fallen.add(tile.b);
+      ch.tiles.add(y * s.w + x);
+    }
+  let down = 0;
+  for (const id of fallen) {
+    const b = s.buildings.find((q) => q.id === id)!;
+    // the shared Depot and the World Engines are beyond even a god
+    if (BUILDINGS[b.type].protected || BUILDINGS[b.type].renderValue) continue;
+    for (const [fx, fy] of footprint(b)) {
+      s.tiles[fy * s.w + fx].b = 0;
+      ch.tiles.add(fy * s.w + fx);
+    }
+    s.buildings = s.buildings.filter((q) => q.id !== id);
+    ch.removed.push(id);
+    down++;
+  }
+  ch.blasts.push([bomb.x, bomb.y]);
+  log(s, ch, down ? `${bomb.by}'s bomb went off and took ${down} building${down === 1 ? "" : "s"} with it.` : `${bomb.by}'s bomb went off on ${st.name}.`);
+  ch.meta = true;
+}
+
+/** Gods change hands, auras fade and bombs go off. Runs every tick of play, gods on or not, so nothing is left ticking. */
+function divine(s: RoomState, ch: Changes): void {
+  if (s.god.on && (s.tick >= s.god.until || !s.god.id || !s.players[s.god.id]?.connected)) crown(s, ch);
+  if (s.auras.some((a) => a.until <= s.tick)) {
+    s.auras = s.auras.filter((a) => a.until > s.tick);
+    ch.meta = true;
+  }
+  const due = s.bombs.filter((b) => b.at <= s.tick);
+  if (due.length) {
+    s.bombs = s.bombs.filter((b) => b.at > s.tick);
+    for (const b of due) explode(s, b, ch);
+    checkExhausted(s, ch);
   }
 }
 
@@ -533,6 +758,8 @@ function nextStage(s: RoomState, ch: Changes): void {
   s.inventory = { ...st.starter };
   s.ledger = ledgerFor(g.tiles);
   s.heat = 0;
+  s.bombs = [];
+  s.auras = [];
   s.stageStartTick = s.tick;
   s.lifeStart = averageLife(s);
   s.phase = { k: "play" };
@@ -543,6 +770,8 @@ function nextStage(s: RoomState, ch: Changes): void {
     p.dx = p.dy = 0;
     p.act = null;
     p.marks = 0;
+    // what was carried belonged to the last world; the tools come along
+    p.pack = emptyBundle();
   });
   s.receipts = Object.fromEntries(Object.keys(s.players).map((id) => [id, []]));
   log(s, ch, st.arrival);
@@ -566,6 +795,8 @@ export function tick(s: RoomState, ch: Changes): void {
     return;
   }
   if (s.phase.k === "ended") return;
+  divine(s, ch);
+  if (s.phase.k !== "play") return;
   if (s.tick % PACES[s.pace].econEvery === 0) economy(s, ch);
 }
 
@@ -622,7 +853,7 @@ function economy(s: RoomState, ch: Changes): void {
   let energy = 0;
   for (const f of of("furnace")) {
     if (workers < 1) setStatus(f, "idle: no workers (build homes)", ch);
-    else if (s.inventory.matter < 1) setStatus(f, `idle: no ${st.families.matter.label} to burn`, ch);
+    else if (s.inventory.matter < 1) setStatus(f, `idle: no ${st.families.matter.label} in the stockpile to burn`, ch);
     else {
       workers--;
       s.inventory.matter--;
@@ -651,7 +882,7 @@ function economy(s: RoomState, ch: Changes): void {
     else if (energy < -def.energy) why = st.energySource === "bottled" ? "idle: the Bottled Sun is empty" : "idle: no power";
     else if (workers < -def.workers) why = "idle: no workers (build homes)";
     else if (compute < -def.compute) why = "idle: no compute (build a datacentre)";
-    else if ((def.coolantUse ?? 0) > s.inventory.coolant) why = `idle: no ${st.families.coolant.label} for cooling`;
+    else if ((def.coolantUse ?? 0) > s.inventory.coolant) why = `idle: no ${st.families.coolant.label} in the stockpile for cooling`;
     if (why) {
       setStatus(b, why, ch);
       return false;
@@ -710,7 +941,7 @@ function economy(s: RoomState, ch: Changes): void {
       continue;
     }
     targets.sort((a, b) => s.tiles[b].amt - s.tiles[a].amt);
-    takeFrom(s, targets[0], BUILDINGS.extractor.extract!, ch);
+    takeFrom(s, targets[0], BUILDINGS.extractor.extract!, s.inventory, ch);
   }
   for (const city of of("city")) {
     const def = BUILDINGS.city;

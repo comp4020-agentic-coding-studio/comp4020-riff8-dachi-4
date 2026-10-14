@@ -11,11 +11,24 @@ The game is built from a pod's brief, _Consume the Universe_: let players enjoy 
 Start a world from the front page and send the invite link (or the five-letter room code) to friends. No account: your browser remembers who you are in each room.
 
 - **Walk** with WASD or the arrow keys. Zoom with the wheel or `+`/`-`.
-- **Harvest** by holding `E` (or `Space`) near a tree, rock or pond, or by clicking it. Everything goes into the room's shared stockpile.
-- **Build** with `1`--`6`. A ghost shows the footprint, green where it fits and red with the reason where it doesn't. Click to place it, or press `Enter` for the tile you're facing. `Esc` cancels.
+- **Harvest** by holding `E` (or `Space`) near a tree, rock or pond, or by clicking it. What you gather by hand goes into your own pack.
+- **Make tools** from your pack with the buttons under it: a Cutter, a Pick and a Scoop, one for each kind of stock, each making your own harvesting of that stock quicker. A rough one takes 6 of each of the other two stocks and can be made anywhere; a fine one takes 12 of all three and has to be made beside finished homes. Tools are yours, and you keep them from world to world.
+- **Deposit** your pack into the room's shared stockpile with `G`. Machines only ever fill the stockpile and run on it, so a furnace with nothing to burn is waiting for someone to deposit.
+- **Build** with `1`--`6`. Building spends your pack first and the stockpile for the rest. A ghost shows the footprint, green where it fits and red with the reason where it doesn't. Click to place it, or press `Enter` for the tile you're facing. `Esc` cancels.
 - **Help raise** a building site by pressing `E` beside it: several people building together finish faster.
 - `I` inspects a building (what it needs, what it makes, why it's idle), `X` takes one down for half its cost back, `N` names a favourite place, `V` surveys every deposit left, `P` saves a photo, and `Shift`+`1`--`6` emotes.
 - `H` opens help in the game.
+
+### Hosting, and gods
+
+Whoever starts a world from the front page is its host. Tick **With gods** before hosting and, every 30 seconds, one person in the world is chosen to be a god (someone else each time, when there is anyone else). A halo and the word "god" mark them, and the Gods panel counts their turn down. A god picks a power from that panel and clicks where it lands:
+
+- **Datacentre**: a finished one, for nothing, anywhere it would normally fit.
+- **Bomb**: goes off 3 seconds after it's put down. Everything within about two tiles is flattened: the stock is destroyed (and counted as destroyed), buildings fall, the ground dies. The Depot and the World Engines survive. At most three can be ticking.
+- **Plant**: a fresh, full deposit of any of the three stocks on an empty tile.
+- **Aura**: for 5 seconds, everyone standing in it except the god harvests twice as fast.
+
+The host can turn gods off, and back on, from the Gods panel at any time.
 
 Start with the Cooperative memo in the corner: gather, build cottages, power them, build a datacentre, put a harvester beside a grove. The stockpile panel tells you what most of your idle machines are waiting for.
 

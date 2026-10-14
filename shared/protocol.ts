@@ -1,10 +1,10 @@
 // The wire protocol between browser and game server. Versioned: a client and
 // server that disagree on PROTOCOL_VERSION refuse each other rather than
 // guess. All messages are JSON text frames.
-import type { Bundle, BuildingType, Emote, Family, Pace, StageId } from "./content.ts";
+import type { Bundle, BuildingType, Emote, Family, GodPower, Pace, StageId, ToolLevels } from "./content.ts";
 
-export const PROTOCOL_VERSION = 1;
-export const SCHEMA_VERSION = 1;
+export const PROTOCOL_VERSION = 3;
+export const SCHEMA_VERSION = 3;
 export const MAX_MESSAGE_BYTES = 2048;
 
 export type Terrain = 0 | 1 | 2 | 3 | 4; // ground, water/ice, void, stellar core, remnant
@@ -58,9 +58,43 @@ export interface Player {
   nextHarvest: number;
   nextEmote: number;
   marks: number;
+  /** what this player carries: hand harvests land here, and only they can spend or deposit it */
+  pack: Bundle;
+  /** tier of each family's hand tool, 0 for bare hands; kept across worlds */
+  tools: ToolLevels;
   /** in the Universe: this player wants to stop and leave the rest alone */
   stop?: boolean;
   stats: PlayerStats;
+}
+
+export interface GodState {
+  /** the host's switch */
+  on: boolean;
+  /** who is a god right now, if anyone */
+  id: string | null;
+  /** tick their turn ends */
+  until: number;
+  /** tick the god may next act */
+  ready: number;
+  /** bombs and auras made so far, for ids */
+  made: number;
+}
+
+export interface Bomb {
+  id: number;
+  x: number;
+  y: number;
+  /** tick it goes off */
+  at: number;
+  by: string;
+}
+
+export interface Aura {
+  id: number;
+  x: number;
+  y: number;
+  /** tick it fades */
+  until: number;
 }
 
 export interface LedgerEntry {
@@ -125,11 +159,15 @@ export interface RoomState {
   tiles: Tile[];
   buildings: Building[];
   nextBuildingId: number;
+  /** the shared stockpile: machines fill it and draw on it, players deposit into it */
   inventory: Bundle;
   ledger: Ledger;
   econ: Econ;
   heat: number;
   reserve: number;
+  god: GodState;
+  bombs: Bomb[];
+  auras: Aura[];
   history: StageSummary[];
   archive: ArchiveEntry[];
   players: Record<string, Player>;
@@ -147,6 +185,10 @@ export type Command =
   | { k: "demolish"; x: number; y: number }
   | { k: "emote"; e: Emote }
   | { k: "mark"; x: number; y: number; name: string }
+  | { k: "craft"; tool: Family }
+  | { k: "deposit" }
+  | { k: "god"; power: GodPower; x: number; y: number; family?: Family }
+  | { k: "gods"; on: boolean }
   | { k: "stop"; on: boolean };
 
 export type ClientMsg =
@@ -170,7 +212,9 @@ export interface Delta {
   tiles?: [number, Tile][];
   buildings?: Building[];
   removed?: number[];
-  meta?: Pick<RoomState, "inventory" | "ledger" | "econ" | "heat" | "reserve" | "phase" | "hostId"> &
+  /** bombs that went off in this delta: [x, y] */
+  blasts?: [number, number][];
+  meta?: Pick<RoomState, "inventory" | "ledger" | "econ" | "heat" | "reserve" | "phase" | "hostId" | "god" | "bombs" | "auras"> &
     Partial<Pick<RoomState, "archive" | "history">>;
   log?: LogEntry[];
 }

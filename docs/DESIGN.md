@@ -27,7 +27,8 @@ Explore, gather by hand, choose a tile, build, gain a capability, meet a new dem
 Everything is whole numbers, defined in [`shared/content.ts`](../shared/content.ts). Units are normalised per world rather than scaled up: a world holds about a thousand units whatever it is, so a galaxy and a grove are both "a deposit of about sixteen" and no large-number representation is needed. The scale is told by the names, the map and the camera, not by digits.
 
 - **Natural stock**: deposits on tiles, finite. Three families per world (matter, mineral, coolant), relabelled per world: timber, stone and fresh water on Earth; plasma, magnetics and shade on the Sun.
-- **Inventory**: the room's single shared stockpile. Spending is atomic and can't go negative.
+- **Inventory**: each player has a pack, and the room has one shared stockpile. A hand harvest lands in the harvester's pack; a machine's harvest lands in the stockpile, and machines draw only on the stockpile. A build spends the builder's pack first and the stockpile for the rest; `G` deposits a whole pack. Spending is atomic and neither can go negative. Packs are emptied at a world boundary, like the stockpile.
+- **Tools**: a Cutter (matter), a Pick (mineral) and a Scoop (coolant), each shortening its owner's hand-harvest cooldown for that family from 0.8 s to 0.5 s (rough) and 0.3 s (fine). A tool never takes a bigger bite, so the ledger and a tool-less player's pacing are unchanged. Tools are paid for from the crafter's pack alone: rough costs 6 of each of the other two families and is made anywhere; fine costs 12 of all three and is made within 3.5 tiles of finished homes. They are kept across worlds, so the first world's gathering buys speed for the whole campaign.
 - **Capacity**: power, compute and workers are flows recomputed every economy tick, never stored. Unused power is lost. The exception is the Bottled Sun, a stored energy reserve (below).
 
 | Building | Job | Needs | Gives |
@@ -47,7 +48,7 @@ Each building has a different job; none is a bigger number of another. The decis
 - **Furnace or Sun Garden.** Furnaces give two and a half times the power on a quarter of the ground, but the smoke kills groves (recorded in the ledger as _destroyed_, not extracted) and browns the island. Sun Gardens are clean and take land.
 - **Compact or sprawling.** Plazas and served cities reward clustering; every 2×2 building turns living ground to 15% life.
 - **Coolant.** On Earth the datacentre drinks the pond. On Mars domes and datacentres drink the same ice, and the dense playtest stalled a whole colony on it (see [`TESTING.md`](TESTING.md)).
-- **Shared or private.** The stockpile is shared, so one player's datacentre spends everyone's water. Buildings are owned (the builder's name is on the inspect panel) and only the builder or the host can take one down.
+- **Shared or private.** What you carry is yours until you spend or deposit it: keep it for your next tool, or hand it to the stockpile the furnaces and datacentres run on. The stockpile is shared, so one player's datacentre spends everyone's water. Buildings are owned (the builder's name is on the inspect panel) and only the builder or the host can take one down.
 
 **Idle states are text, not colour.** Every idle building shows a `!` (or `~` when throttled) and its inspect panel says why: "idle: no workers (build homes)", "idle: outside a dome's air". The stockpile panel names the commonest reason across the whole machine.
 
@@ -84,9 +85,20 @@ Each world is data in `STAGES` plus one mechanic switch in the economy tick. Map
 
 **The restraint ending.** In the Universe, and only there, a panel offers to stop: "N units of the Universe are left. You could stop here and leave them alone, for good." Each player votes; harvesting or building takes your vote back, so you can't vote to stop with your hands still in the till. When everyone present agrees, the campaign ends with the rest still out there (recorded in the ledger as _remaining_ and in the archive as "left alone"), the music keeps playing, and the card reads "You stopped. The Cooperative's machine idles. It could have finished. Nobody asked it to." Absent players can't block it, and a holdout's dropped connection never triggers it: if they leave, someone still here confirms by voting again. It's irreversible and it costs the full ending, so it only means something to a group that has argued about it. Restraint is offered only at the last world on purpose: by then every earlier world is already spent, so stopping saves something without pretending to undo anything.
 
+## Gods
+
+A room can be hosted with gods (`POST /api/rooms {gods: true}`, the tick box on the front page). While they are on, one connected player is a god for 30 seconds, then another is chosen, never the same one twice running when anyone else is there; a god who disconnects is replaced on the next tick. The host can switch gods off and on (`gods`), which is the only control over them.
+
+A god may act once a second, from anywhere:
+
+- **Datacentre**: finished, free, owned by the god. Every placement rule but cost and reach still applies, so a deposit with stock is never covered.
+- **Bomb**: 3-second fuse, radius 2.3 tiles, at most three ticking. Stock in reach moves from `remaining` to `destroyed`; buildings fall with no salvage, except the Depot and World Engines; the ground's life goes to zero. A bomb that destroys the last stock ends the world like any other exhaustion. Bombs are cleared at a world boundary.
+- **Plant**: a full deposit (the world's `perTile`) on any tile with nothing built and nothing growing, except the star and the spent worlds. It adds to `initial` and `remaining` together, so the ledger still balances. This is the one way a world's stock can grow, which means a room with gods can put off a world's end for as long as its gods keep planting; that is what the host's switch is for.
+- **Aura**: radius 4, 5 seconds, at most two. A non-god inside one has their harvest cooldown halved (to no less than 0.2 s), on top of their tool.
+
 ## Multiplayer rules
 
-- Natural stock and the stockpile are communal; buildings are owned for recognition and permission; stats (harvested, built, helped) are individual and shown at the end.
+- Natural stock and the stockpile are communal; packs and tools are individual; buildings are owned for recognition and permission; stats (harvested, built, helped) are individual and shown at the end.
 - Cooperation is mechanical, not just social: several players pressing `E` beside a site raise it faster, and dividing work (one gathers ice while another builds domes) is the only way the dependent stages flow.
 - Tension is built in: the shared stockpile lets one player's furnace burn the grove another player named.
 - The host is whoever created the room, or the longest-connected player when the host is away. The host can take down anyone's building and render down World Engines.

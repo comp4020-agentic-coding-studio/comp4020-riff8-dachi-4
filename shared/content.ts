@@ -411,10 +411,66 @@ export const PLAYER_SPEED = 4; // tiles per second
 export const HARVEST_RANGE = 2.2; // tiles
 export const BUILD_RANGE = 8; // tiles
 export const HARVEST_COOLDOWN_TICKS = 8;
+/** how close to a finished home you must stand to use its workbench */
+export const BENCH_RANGE = 3.5;
+
+/**
+ * Hand tools, one per family: each makes its owner's hand harvest of that
+ * family quicker (a shorter cooldown, never a bigger bite, so the ledger and
+ * the pacing of a tool-less player are untouched). A tool is paid for out of
+ * the crafter's own pack. The rough tier is made anywhere from the two
+ * families it doesn't harvest; the fine tier takes all three and a workbench,
+ * which is any finished home. Tools are kept from world to world.
+ */
+export const TOOL_NAMES: Record<Family, string> = { matter: "Cutter", mineral: "Pick", coolant: "Scoop" };
+export interface ToolTier {
+  label: string;
+  /** ticks between hand harvests of the tool's family */
+  cooldown: number;
+  /** units of the tool's own family, and of each of the other two */
+  own: number;
+  others: number;
+  bench: boolean;
+}
+export const TOOL_TIERS: ToolTier[] = [
+  { label: "Bare hands", cooldown: HARVEST_COOLDOWN_TICKS, own: 0, others: 0, bench: false },
+  { label: "Rough", cooldown: 5, own: 0, others: 6, bench: false },
+  { label: "Fine", cooldown: 3, own: 12, others: 12, bench: true },
+];
+export type ToolLevels = Record<Family, number>;
+
+export const toolCost = (family: Family, tier: number): Bundle => {
+  const t = TOOL_TIERS[tier];
+  return Object.fromEntries(FAMILIES.map((f) => [f, f === family ? t.own : t.others])) as Bundle;
+};
+export const harvestCooldown = (tools: ToolLevels, family: Family): number => TOOL_TIERS[tools[family]]?.cooldown ?? HARVEST_COOLDOWN_TICKS;
+export const toolName = (family: Family, tier: number): string => `${TOOL_TIERS[tier].label} ${TOOL_NAMES[family]}`;
 export const MARKS_PER_PLAYER = 3;
 export const SALVAGE_RATE = 0.5;
 /** heat at which collectors throttle to half output (the Sun) */
 export const HEAT_LIMIT = 70;
+
+/**
+ * Gods: when a room has them on, one connected player at a time is a god for
+ * GOD_TERM_TICKS, then another is chosen. A god can raise a finished
+ * datacentre for nothing, drop a bomb, plant a new deposit, or lay an aura
+ * that speeds up everyone else's hands. The host can turn gods off and on.
+ */
+export const GOD_POWERS = ["datacentre", "bomb", "plant", "aura"] as const;
+export type GodPower = (typeof GOD_POWERS)[number];
+export const GOD_TERM_TICKS = 300; // 30 s
+/** ticks between one god's acts */
+export const GOD_COOLDOWN_TICKS = 10;
+export const BOMB_FUSE_TICKS = 30;
+/** tiles from the bomb, centre to centre, that are flattened */
+export const BOMB_RADIUS = 2.3;
+export const MAX_BOMBS = 3;
+export const AURA_TICKS = 50; // 5 s
+export const AURA_RADIUS = 4;
+export const MAX_AURAS = 2;
+/** inside an aura a mortal's harvest cooldown is divided by this, to no less than AURA_MIN_COOLDOWN */
+export const AURA_SPEEDUP = 2;
+export const AURA_MIN_COOLDOWN = 2;
 
 export const EMOTES = ["wave", "heart", "laugh", "wow", "sad", "point"] as const;
 export type Emote = (typeof EMOTES)[number];

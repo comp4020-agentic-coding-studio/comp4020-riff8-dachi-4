@@ -3,18 +3,20 @@
 // visual bible (rounded forms, a soft dark outline, warm light from the upper
 // left, one palette per stage that drains toward its "dead" colour as tiles
 // lose life), so every asset is code in this file and replaceable in one place.
-import { BUILDINGS, STAGES, type BuildingType, type Family, type StageDef } from "../shared/content.ts";
-import type { Building, Player, Snapshot, Tile } from "../shared/protocol.ts";
-import { averageLife, effectiveLife, lifeCap, placementProblem } from "../shared/sim.ts";
+import { AURA_RADIUS, BOMB_RADIUS, BUILDINGS, STAGES, TICK_MS, type BuildingType, type Family, type GodPower, type StageDef } from "../shared/content.ts";
+import type { Aura, Bomb, Building, Player, Snapshot, Tile } from "../shared/protocol.ts";
+import { averageLife, effectiveLife, lifeCap, placementProblem, plantProblem } from "../shared/sim.ts";
 import type { RoomState } from "../shared/protocol.ts";
 import { TH, TW, screenToTile, toScreen, toWorld, type Camera } from "./iso.ts";
 import type { GameClient } from "./net.ts";
 
-export type Tool = "harvest" | "build" | "inspect" | "demolish" | "mark";
+export type Tool = "harvest" | "build" | "inspect" | "demolish" | "mark" | "god";
 
 export interface View {
   tool: Tool;
   build: BuildingType | null;
+  /** the power a god has in hand, when tool is "god" */
+  god: { power: GodPower; family?: Family } | null;
   hover: [number, number] | null;
   /** keyboard placement: the tile in front of the avatar, used when the mouse is idle */
   keyboardTarget: boolean;
@@ -49,7 +51,7 @@ interface Fx {
   t0: number;
   text?: string;
   colour: string;
-  kind: "pop" | "dust" | "smoke";
+  kind: "pop" | "dust" | "smoke" | "blast";
   vx: number;
   vy: number;
 }
@@ -90,6 +92,12 @@ export class Renderer {
     if (!ctx) throw new Error("no 2d context");
     this.ctx = ctx;
     client.onTile = (i, before, after) => this.tileFx(i, before - after);
+    client.onBlast = (x, y) => {
+      const t0 = performance.now();
+      this.fx.push({ x, y, t0, colour: "#fff3c4", kind: "blast", vx: 0, vy: 0 });
+      if (this.view.low) return;
+      for (let k = 0; k < 18; k++) this.fx.push({ x, y, t0, colour: k % 2 ? "#ff9a4d" : "#5a4a44", kind: "dust", vx: (Math.random() - 0.5) * 7, vy: (Math.random() - 0.5) * 7 });
+    };
     client.onBoundary = () => {
       this.boundaryAt = performance.now();
       this.fx = [];
@@ -231,6 +239,7 @@ export class Renderer {
 
     // overlays on the ground: survey, pressure, ghost footprint
     this.overlays(s, st, anim);
+    for (const a of s.auras) this.aura(s, a, anim);
 
     // objects, depth sorted
     const items: { depth: number; draw: () => void }[] = [];
@@ -239,6 +248,7 @@ export class Renderer {
       const y = Math.floor(i / s.w);
       if ((t.d || t.mark) && !t.b && visible(x, y)) items.push({ depth: x + y, draw: () => this.deposit(s, st, t, x, y, anim, i) });
     });
+    for (const b of s.bombs) if (visible(b.x, b.y)) items.push({ depth: b.x + b.y + 0.2, draw: () => this.bomb(s, b, anim) });
     const behind = this.playersBehind(s);
     for (const b of s.buildings) {
       const n = BUILDINGS[b.type].size;
@@ -832,7 +842,16 @@ export class Renderer {
       }
     }
     const isMe = p.id === this.client.you;
-    this.label(`${p.name}${isMe ? " (you)" : ""}${p.connected ? "" : " · away"}`, cx, cy - 44 * z, isMe ? "#fffbe0" : "#ffffff", 11, col);
+    const god = this.client.state?.god.id === p.id;
+    if (god) {
+      // a halo, and the word: never colour alone
+      ctx.strokeStyle = "#ffe680";
+      ctx.lineWidth = 2.5 * z;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy - 56 * z, 9 * z, 3.5 * z, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    this.label(`${p.name}${isMe ? " (you)" : ""}${god ? " · god" : ""}${p.connected ? "" : " · away"}`, cx, cy - 44 * z, isMe ? "#fffbe0" : "#ffffff", 11, col);
     // a compact prompt for your first harvests: what E would do right now
     if (isMe && p.stats.harvested + p.stats.helped < 25 && this.view.tool === "harvest") {
       const hint = this.harvestHint(st, x, y);
@@ -889,6 +908,33 @@ export class Renderer {
     ctx.fillText(text, x + (bg ? 2 : 0), y + 0.5);
   }
 
+  /** A ring on the ground, radius in tiles, drawn as the isometric ellipse it is. */
+  private ring(x: number, y: number, radius: number, fill: string, stroke: string): void {
+    const pts: [number, number][] = [];
+    for (let k = 0; k < 28; k++) pts.push(toScreen(this.cam, ...toWorld(x + Math.cos((k / 28) * Math.PI * 2) * radius, y + Math.sin((k / 28) * Math.PI * 2) * radius)));
+    this.poly(pts, fill, stroke);
+  }
+
+  private aura(s: Snapshot, a: Aura, anim: number): void {
+    const left = Math.max(0, (a.until - s.tick) * TICK_MS) / 1000;
+    if (left <= 0) return;
+    const pulse = this.view.reducedMotion ? 0.2 : 0.16 + 0.06 * Math.sin(anim * 5);
+    this.ring(a.x, a.y, AURA_RADIUS, `rgba(255,224,120,${pulse})`, "rgba(255,236,160,0.9)");
+    const [cx, cy] = toScreen(this.cam, ...toWorld(a.x, a.y));
+    this.label(`aura: quicker hands, ${Math.ceil(left)}s`, cx, cy, "#fff3c4", 11);
+  }
+
+  private bomb(s: Snapshot, b: Bomb, anim: number): void {
+    const z = this.cam.zoom;
+    const [cx, cy] = toScreen(this.cam, ...toWorld(b.x, b.y));
+    this.ring(b.x, b.y, BOMB_RADIUS, "rgba(230,70,60,0.14)", "rgba(255,120,100,0.8)");
+    const left = Math.max(0, (b.at - s.tick) * TICK_MS) / 1000;
+    const throb = this.view.reducedMotion ? 1 : 1 + 0.1 * Math.sin(anim * 14);
+    this.ellipse(cx, cy - 8 * z, 8 * z * throb, 8 * z * throb, "#2b2630", OUTLINE);
+    this.ellipse(cx + 5 * z, cy - 16 * z, 2.5 * z, 2.5 * z, "#ffb347");
+    this.label(`bomb: ${left.toFixed(1)}s`, cx, cy - 26 * z, "#ffd1cc", 11);
+  }
+
   private ghost(s: Snapshot, st: StageDef): void {
     const tgt = this.target();
     if (!tgt) return;
@@ -908,6 +954,27 @@ export class Renderer {
       this.poly([[cx, cy - h - 10], [pts[1][0], pts[1][1] - h], [cx, B[1] - h], [pts[3][0], pts[3][1] - h]], BUILD_LOOK[this.view.build].roof);
       ctx.globalAlpha = 1;
       this.label(problem ? `✕ ${problem}` : `✓ place ${st.names[this.view.build] ?? this.view.build}`, cx, cy + 24 * this.cam.zoom, problem ? "#ffd1cc" : "#d8ffdc", 12);
+    } else if (this.view.tool === "god" && this.view.god && x >= 0 && y >= 0 && x < s.w && y < s.w) {
+      const g = this.view.god;
+      const [cx, cy] = toScreen(this.cam, ...toWorld(x, y));
+      let problem: string | null = null;
+      let what = "";
+      if (g.power === "datacentre") {
+        problem = placementProblem(s as RoomState, "datacentre", x, y, undefined, true);
+        what = `raise a ${st.names.datacentre ?? "datacentre"}`;
+        this.poly(this.corners(x, y, BUILDINGS.datacentre.size), problem ? "rgba(230,80,70,0.35)" : "rgba(255,224,120,0.35)", "#ffe680");
+      } else if (g.power === "plant" && g.family) {
+        problem = plantProblem(s, x, y);
+        what = `plant ${st.families[g.family].label}`;
+        this.poly(this.corners(x, y), problem ? "rgba(230,80,70,0.35)" : "rgba(255,224,120,0.35)", "#ffe680");
+      } else if (g.power === "bomb") {
+        what = "put a bomb down";
+        this.ring(x, y, BOMB_RADIUS, "rgba(230,70,60,0.18)", "#ff8a7a");
+      } else {
+        what = "lay an aura";
+        this.ring(x, y, AURA_RADIUS, "rgba(255,224,120,0.18)", "#ffe680");
+      }
+      this.label(problem ? `✕ ${problem}` : `✓ ${what}`, cx, cy + 24 * this.cam.zoom, problem ? "#ffd1cc" : "#fff3c4", 12);
     } else if (x >= 0 && y >= 0 && x < s.w && y < s.w) {
       const stroke = this.view.tool === "demolish" ? "#ff8a7a" : this.view.tool === "mark" ? "#ffd27a" : "rgba(255,255,240,0.9)";
       this.poly(this.corners(x, y), "rgba(255,255,255,0.08)", stroke);
@@ -1039,6 +1106,9 @@ export class Renderer {
         ctx.beginPath();
         ctx.arc(sx, sy - 10 * this.cam.zoom - age * 20, 2.5 * this.cam.zoom, 0, Math.PI * 2);
         ctx.fill();
+      } else if (f.kind === "blast") {
+        ctx.globalAlpha = Math.max(0, 0.8 - age * 1.6);
+        this.ring(f.x, f.y, BOMB_RADIUS * Math.min(1, 0.3 + age * 3), f.colour, "#ff9a4d");
       } else if (f.kind === "smoke") {
         ctx.globalAlpha = Math.max(0, 0.5 - age / 5);
         ctx.fillStyle = f.colour;

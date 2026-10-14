@@ -51,8 +51,25 @@ export function saveRoom(s: RoomState): void {
 export function loadRoom(code: string): RoomState | null {
   const row = select.get(code) as { schema: number; state: string } | undefined;
   if (!row) return null;
-  if (row.schema !== SCHEMA_VERSION) throw new Error(`room ${code} is schema ${row.schema}, server expects ${SCHEMA_VERSION}`);
-  return JSON.parse(row.state) as RoomState;
+  const s = JSON.parse(row.state) as RoomState;
+  let schema = row.schema;
+  if (schema === 1) {
+    // 1 -> 2: every player gets a pack and tools; what was gathered stays in the stockpile
+    for (const p of Object.values(s.players)) {
+      p.pack = { matter: 0, mineral: 0, coolant: 0 };
+      p.tools = { matter: 0, mineral: 0, coolant: 0 };
+    }
+    s.v = schema = 2;
+  }
+  if (schema === 2) {
+    // 2 -> 3: rooms from before gods have them switched off
+    s.god = { on: false, id: null, until: 0, ready: 0, made: 0 };
+    s.bombs = [];
+    s.auras = [];
+    s.v = schema = 3;
+  }
+  if (schema !== SCHEMA_VERSION) throw new Error(`room ${code} is schema ${row.schema}, server expects ${SCHEMA_VERSION}`);
+  return s;
 }
 
 export const roomExists = (code: string): boolean => exists.get(code) !== undefined;

@@ -39,6 +39,9 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
   background: radial-gradient(circle at 30% 20%, #d9f2c9, #fdf3d8 60%); }
 .card { background: var(--paper); border: 2px solid var(--line); border-radius: 16px; padding: 1.2rem 1.4rem; box-shadow: 0 4px 0 var(--line); max-width: 40rem; }
 .card h1 { margin: 0 0 0.4rem; font-size: 2.6rem; letter-spacing: 0.02em; }
+.host { border: 2px solid var(--line); border-radius: 12px; padding: 0.5rem 0.8rem 0.7rem; margin: 0.8rem 0; }
+.host legend { font-weight: 700; padding: 0 0.3rem; }
+.host .check { display: flex; align-items: flex-start; margin: 0.4rem 0 0.6rem; }
 .hero .lede { font-size: 1.05rem; line-height: 1.5; }
 .loading { padding: 2rem; text-align: center; }
 
@@ -50,6 +53,14 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
 .panel ul, .panel ol { margin: 0; padding: 0; list-style: none; }
 .col-left { position: absolute; top: 0.6rem; left: 0.6rem; width: min(19rem, 44vw); display: flex; flex-direction: column; gap: 0.45rem; max-height: calc(100vh - 9rem); overflow: auto; }
 .col-left .panel { position: static; }
+.gods.mine { border-color: #c79a1e; box-shadow: 0 3px 0 #c79a1e; }
+.gods .powers { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0.25rem 0; }
+.gods button { font-size: 0.78rem; }
+.gods button.on { background: #ffe680; }
+.pack h2:not(:first-child) { margin-top: 0.5rem; }
+.pack button { font-size: 0.78rem; margin-top: 0.25rem; text-align: left; }
+.pack button.short { background: var(--paper-2); }
+.pack .tools li { padding: 0.15rem 0; display: flex; flex-direction: column; align-items: flex-start; }
 .top-right { top: 0.6rem; right: 0.6rem; max-width: min(17rem, 44vw); }
 
 .memo li { padding: 0.1rem 0; opacity: 0.55; }

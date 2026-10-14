@@ -40,7 +40,7 @@ What was checked, how, and what it showed. Targets and results are kept apart, a
 
 **`spec/invariants.test.ts`**, the course's: `/` answers and `/readme/` publishes this README with every heading.
 
-30 tests, all passing locally and against the production Docker image.
+47 tests, all passing locally. The 30 that predate packs, tools and gods were also run against the production Docker image.
 
 ## Multiplayer playthroughs
 

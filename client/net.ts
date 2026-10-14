@@ -2,7 +2,7 @@
 // (mutated in place, read by the renderer every frame) and a version counter
 // the HUD polls at a few hertz, so React never sees per-entity updates.
 import { PROTOCOL_VERSION, type ClientMsg, type Command, type Delta, type LogEntry, type ServerMsg, type Snapshot } from "../shared/protocol.ts";
-import { PLAYER_SPEED, TICK_MS } from "../shared/content.ts";
+import { BOMB_RADIUS, PLAYER_SPEED, TICK_MS } from "../shared/content.ts";
 
 export type Status = "connecting" | "live" | "reconnecting" | "error";
 
@@ -37,6 +37,8 @@ export class GameClient {
   swingUntil = 0;
   /** fired on every applied tile change: the renderer spawns effects from these */
   onTile: ((i: number, before: number, after: number) => void) | null = null;
+  /** fired when a bomb goes off */
+  onBlast: ((x: number, y: number) => void) | null = null;
   onAck: ((ok: boolean, c: Command, reason?: string) => void) | null = null;
   onBoundary: (() => void) | null = null;
 
@@ -199,8 +201,11 @@ export class GameClient {
     for (const [i, t] of d.tiles ?? []) {
       const before = s.tiles[i]?.amt ?? 0;
       s.tiles[i] = t;
-      if (t.amt < before) this.onTile?.(i, before, t.amt);
+      // stock a bomb destroyed is not a harvest: no "+n" for it
+      const bombed = d.blasts?.some(([bx, by]) => Math.hypot((i % s.w) - bx, Math.floor(i / s.w) - by) <= BOMB_RADIUS);
+      if (t.amt < before && !bombed) this.onTile?.(i, before, t.amt);
     }
+    for (const [bx, by] of d.blasts ?? []) this.onBlast?.(bx, by);
     if (d.buildings) for (const b of d.buildings) {
       const at = s.buildings.findIndex((q) => q.id === b.id);
       if (at >= 0) s.buildings[at] = b;

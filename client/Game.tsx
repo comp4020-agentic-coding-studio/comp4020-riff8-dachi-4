@@ -3,9 +3,9 @@
 // compact React HUD that re-renders at most five times a second from the
 // client's version counter, never per entity update.
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BUILDINGS, EMOTES, FAMILIES, HARVEST_RANGE, STAGES, buildingName, type BuildingType, type Emote } from "../shared/content.ts";
-import type { Building, Snapshot } from "../shared/protocol.ts";
-import { averageLife } from "../shared/sim.ts";
+import { BUILDINGS, EMOTES, FAMILIES, HARVEST_COOLDOWN_TICKS, HARVEST_RANGE, STAGES, TICK_MS, TOOL_TIERS, buildingName, harvestCooldown, toolCost, toolName, type BuildingType, type Emote, type Family, type GodPower } from "../shared/content.ts";
+import type { Building, Player, Snapshot } from "../shared/protocol.ts";
+import { averageLife, craftProblem, harvestTicks } from "../shared/sim.ts";
 import { GameClient } from "./net.ts";
 import { PLAYER_COLOURS, Renderer, type Tool, type View } from "./render.ts";
 import { Sound, type Mix } from "./audio.ts";
@@ -49,7 +49,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   const [client, setClient] = useState<GameClient | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const soundRef = useRef(new Sound());
-  const viewRef = useRef<View>({ tool: "harvest", build: null, hover: null, keyboardTarget: true, survey: false, selected: null, reducedMotion: prefersReducedMotion(), low: false, zoom: 1 });
+  const viewRef = useRef<View>({ tool: "harvest", build: null, god: null, hover: null, keyboardTarget: true, survey: false, selected: null, reducedMotion: prefersReducedMotion(), low: false, zoom: 1 });
   const [, force] = useState(0);
   const [help, setHelp] = useState(false);
   const [naming, setNaming] = useState<[number, number] | null>(null);
@@ -76,7 +76,13 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       soundRef.current.boundary();
       viewRef.current.tool = "harvest";
       viewRef.current.build = null;
+      viewRef.current.god = null;
       viewRef.current.selected = null;
+    };
+    const drawBlast = c.onBlast;
+    c.onBlast = (x, y) => {
+      drawBlast?.(x, y);
+      soundRef.current.blast();
     };
     c.connect();
     r.start();
@@ -104,7 +110,16 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   useEffect(() => {
     if (!client) return;
     const held = new Set<string>();
-    let harvestTimer: ReturnType<typeof setInterval> | null = null;
+    let harvestTimer: ReturnType<typeof setTimeout> | null = null;
+    // holding the key swings again as soon as the tool in hand allows
+    const holdHarvest = (): void => {
+      const family = quickHarvest();
+      const st = client.state;
+      const me = st?.players[client.you];
+      // an aura counts from where you're standing now, as the server will see it
+      const ticks = family && st && me ? harvestTicks(st, { ...me, x: client.me.x, y: client.me.y }, family) : HARVEST_COOLDOWN_TICKS;
+      harvestTimer = setTimeout(holdHarvest, ticks * TICK_MS + 20);
+    };
     const sendMove = (): void => {
       let dx = 0;
       let dy = 0;
@@ -143,8 +158,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       if (e.repeat) return;
       if (k === "e" || k === " ") {
         e.preventDefault();
-        quickHarvest();
-        if (!harvestTimer) harvestTimer = setInterval(quickHarvest, 820);
+        if (!harvestTimer) holdHarvest();
       } else if (e.shiftKey && /^digit[1-6]$/i.test(e.code)) {
         e.preventDefault();
         client.send({ k: "emote", e: EMOTES[Number(e.code.slice(5)) - 1] });
@@ -165,6 +179,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       } else if (k === "x") setTool("demolish");
       else if (k === "i") setTool("inspect");
       else if (k === "n") setTool("mark");
+      else if (k === "g") client.send({ k: "deposit" });
       else if (k === "v") {
         viewRef.current.survey = !viewRef.current.survey;
         rerender();
@@ -177,14 +192,14 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       const k = e.key.toLowerCase();
       if (held.delete(k)) sendMove();
       if ((k === "e" || k === " ") && harvestTimer) {
-        clearInterval(harvestTimer);
+        clearTimeout(harvestTimer);
         harvestTimer = null;
       }
     };
     const blur = (): void => {
       held.clear();
       sendMove();
-      if (harvestTimer) clearInterval(harvestTimer);
+      if (harvestTimer) clearTimeout(harvestTimer);
       harvestTimer = null;
     };
     window.addEventListener("keydown", down);
@@ -194,7 +209,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
       window.removeEventListener("blur", blur);
-      if (harvestTimer) clearInterval(harvestTimer);
+      if (harvestTimer) clearTimeout(harvestTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
@@ -202,13 +217,23 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   function setTool(tool: Tool): void {
     view.tool = tool;
     if (tool !== "build") view.build = null;
+    if (tool !== "god") view.god = null;
     if (tool !== "inspect") view.selected = null;
+    rerender();
+  }
+
+  function chooseGod(power: GodPower, family?: Family): void {
+    view.tool = "god";
+    view.god = { power, family };
+    view.build = null;
+    view.selected = null;
     rerender();
   }
 
   function chooseBuild(type: BuildingType): void {
     view.tool = "build";
     view.build = type;
+    view.god = null;
     view.selected = null;
     rerender();
   }
@@ -217,11 +242,11 @@ export default function Game({ room, name }: { room: string; name: string }): Re
     view.zoom = Math.max(0.5, Math.min(2.2, view.zoom * k));
   }
 
-  /** Harvest (or help build) the best thing in reach: the forgiving keyboard path. */
-  function quickHarvest(): void {
+  /** Harvest (or help build) the best thing in reach: the forgiving keyboard path. Returns the family harvested, if any. */
+  function quickHarvest(): Family | null {
     const c = client;
     const st = c?.state;
-    if (!c || !st) return;
+    if (!c || !st) return null;
     let best: [number, number] | null = null;
     let bd = Infinity;
     const r = Math.ceil(HARVEST_RANGE);
@@ -237,8 +262,11 @@ export default function Game({ room, name }: { room: string; name: string }): Re
     if (best) {
       c.send({ k: "harvest", x: best[0], y: best[1] });
       soundRef.current.tap();
+      const t = st.tiles[best[1] * st.w + best[0]];
+      return t.b ? null : t.d;
     }
-    else c.toast("Nothing in reach to harvest. Press V to survey.", "bad");
+    c.toast("Nothing in reach to harvest. Press V to survey.", "bad");
+    return null;
   }
 
   function act(x: number, y: number): void {
@@ -249,6 +277,9 @@ export default function Game({ room, name }: { room: string; name: string }): Re
     switch (view.tool) {
       case "build":
         if (view.build) c.send({ k: "build", x, y, type: view.build });
+        break;
+      case "god":
+        if (view.god) c.send({ k: "god", power: view.god.power, x, y, family: view.god.family });
         break;
       case "demolish":
         if (t.b) c.send({ k: "demolish", x, y });
@@ -304,6 +335,12 @@ export default function Game({ room, name }: { room: string; name: string }): Re
 
   const st = s ? STAGES[s.stage] : null;
   const host = !!(s && client && s.hostId === client.you);
+  const me = s && client ? s.players[client.you] : undefined;
+  // a god's turn ends on the server's clock: put the power down when it does
+  if (view.tool === "god" && s && client && s.god.id !== client.you) {
+    view.tool = "harvest";
+    view.god = null;
+  }
 
   return (
     <main className="game">
@@ -333,12 +370,16 @@ export default function Game({ room, name }: { room: string; name: string }): Re
         <>
           <div className="col-left">
             <StagePanel s={s} />
+            {(s.god.on || host) && s.phase.k === "play" && (
+              <Gods s={s} you={client.you} host={host} view={view} onPower={chooseGod} onSwitch={(on) => client.send({ k: "gods", on })} />
+            )}
+            {me && <Pack s={s} me={me} onCraft={(tool) => client.send({ k: "craft", tool })} onDeposit={() => client.send({ k: "deposit" })} />}
             <Economy s={s} />
             {st.id === "earth" && s.phase.k === "play" && <Memo s={s} />}
           {st.id === "universe" && s.phase.k === "play" && <LastFrontier s={s} you={client.you} onVote={(on) => client.send({ k: "stop", on })} />}
           </div>
           <RoomPanel s={s} client={client} host={host} />
-          <BuildBar s={s} view={view} onPick={chooseBuild} onTool={setTool} />
+          <BuildBar s={s} me={me} view={view} onPick={chooseBuild} onTool={setTool} />
           <Log s={s} client={client} />
           {view.selected !== null && <Inspect s={s} b={s.buildings.find((b) => b.id === view.selected)} youId={client.you} host={host} onDemolish={(b) => client.send({ k: "demolish", x: b.x, y: b.y })} onClose={() => setTool("harvest")} />}
           <div className="corner-buttons">
@@ -488,6 +529,95 @@ function RoomPanel({ s, client, host }: { s: Snapshot; client: GameClient; host:
   );
 }
 
+/** Who is a god and for how long; the god's powers; and the host's switch. */
+function Gods({ s, you, host, view, onPower, onSwitch }: { s: Snapshot; you: string; host: boolean; view: View; onPower: (p: GodPower, f?: Family) => void; onSwitch: (on: boolean) => void }): ReactNode {
+  const st = STAGES[s.stage];
+  const god = s.god.id ? s.players[s.god.id] : undefined;
+  const mine = s.god.on && s.god.id === you;
+  const secs = Math.max(0, Math.ceil(((s.god.until - s.tick) * TICK_MS) / 1000));
+  const on = (power: GodPower, family?: Family): boolean => view.tool === "god" && view.god?.power === power && view.god.family === family;
+  const power = (label: string, title: string, p: GodPower, f?: Family): ReactNode => (
+    <button key={label} type="button" className={on(p, f) ? "on" : ""} aria-pressed={on(p, f)} title={title} onClick={() => onPower(p, f)}>
+      {label}
+    </button>
+  );
+  return (
+    <div className={`panel left gods ${mine ? "mine" : ""}`}>
+      <h2>Gods</h2>
+      {!s.god.on ? (
+        <p className="small">Gods are off in this world.</p>
+      ) : (
+        <p role="status">
+          {mine ? <strong>You are a god</strong> : god ? <><strong>{god.name}</strong> is a god</> : "Choosing a god…"}
+          {god ? ` for ${secs}s more.` : ""}
+        </p>
+      )}
+      {mine && (
+        <>
+          <p className="small">Pick a power, then click where it should land. Esc puts it down.</p>
+          <div className="row powers">
+            {power(st.names.datacentre ?? "Datacentre", "Raise a finished datacentre for nothing, anywhere it fits", "datacentre")}
+            {power("Bomb", "Goes off after 3 seconds: destroys the stock and the buildings around it", "bomb")}
+            {power("Aura", "For 5 seconds, everyone else standing in it harvests twice as fast", "aura")}
+            {FAMILIES.map((f) => power(`Plant ${st.families[f].label}`, `A new deposit of ${st.families[f].perTile} ${st.families[f].label}`, "plant", f))}
+          </div>
+        </>
+      )}
+      {host && (
+        <button type="button" onClick={() => onSwitch(!s.god.on)}>
+          {s.god.on ? "Turn gods off (host)" : "Turn gods on (host)"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** What you carry and the tools you've made: yours alone, unlike the stockpile below it. */
+function Pack({ s, me, onCraft, onDeposit }: { s: Snapshot; me: Player; onCraft: (f: Family) => void; onDeposit: () => void }): ReactNode {
+  const st = STAGES[s.stage];
+  const empty = FAMILIES.every((f) => me.pack[f] === 0);
+  const secs = (ticks: number): string => `${(ticks * TICK_MS) / 1000}s`;
+  return (
+    <div className="panel left pack">
+      <h2>Your pack</h2>
+      <ul className="inv">
+        {FAMILIES.map((f) => (
+          <li key={f}>
+            <span className="swatch" style={{ background: st.palette[f] }} aria-hidden="true" />
+            {st.families[f].label}: <strong>{me.pack[f]}</strong>
+          </li>
+        ))}
+      </ul>
+      <button type="button" disabled={empty} onClick={onDeposit}>
+        Deposit in the stockpile (G)
+      </button>
+      <h2>Your tools</h2>
+      <ul className="tools">
+        {FAMILIES.map((f) => {
+          const tier = me.tools[f];
+          const next = TOOL_TIERS[tier + 1];
+          const cost = next ? toolCost(f, tier + 1) : null;
+          const problem = next ? craftProblem(s, me, f) : null;
+          return (
+            <li key={f}>
+              <span>
+                <strong>{toolName(f, tier)}</strong>: {st.families[f].label} every {secs(harvestCooldown(me.tools, f))}
+              </span>
+              {next && cost && (
+                <button type="button" className={problem ? "short" : ""} title={problem ?? `Harvest ${st.families[f].label} every ${secs(next.cooldown)}`} onClick={() => onCraft(f)}>
+                  {problem ? "✕ " : ""}Make a {toolName(f, tier + 1)}:{" "}
+                  {FAMILIES.filter((g) => cost[g]).map((g) => `${cost[g]} ${st.families[g].label}`).join(", ")}
+                  {next.bench ? `, beside ${buildingName(st, "city")}` : ""}
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function Economy({ s }: { s: Snapshot }): ReactNode {
   const st = STAGES[s.stage];
   const e = s.econ;
@@ -532,6 +662,7 @@ function Memo({ s }: { s: Snapshot }): ReactNode {
   const has = (t: BuildingType): boolean => s.buildings.some((b) => b.type === t && b.owner);
   const steps: [string, boolean][] = [
     ["Gather timber and stone (E near a tree or rock)", s.ledger.matter.extracted + s.ledger.mineral.extracted >= 20],
+    ["Make a tool from your pack, to gather quicker", Object.values(s.players).some((p) => FAMILIES.some((f) => p.tools[f] > 0))],
     ["Build Cottages for workers", has("city")],
     ["Power them: a Furnace or a Sun Garden", has("furnace") || has("solar")],
     ["Build a Datacentre (it drinks pond water)", has("datacentre")],
@@ -579,13 +710,13 @@ function LastFrontier({ s, you, onVote }: { s: Snapshot; you: string; onVote: (o
   );
 }
 
-function BuildBar({ s, view, onPick, onTool }: { s: Snapshot; view: View; onPick: (t: BuildingType) => void; onTool: (t: Tool) => void }): ReactNode {
+function BuildBar({ s, me, view, onPick, onTool }: { s: Snapshot; me: Player | undefined; view: View; onPick: (t: BuildingType) => void; onTool: (t: Tool) => void }): ReactNode {
   const st = STAGES[s.stage];
   return (
     <div className="panel bottom" role="toolbar" aria-label="Build and tools">
       {st.buildings.map((type, i) => {
         const def = BUILDINGS[type];
-        const short = FAMILIES.filter((f) => (def.cost[f] ?? 0) > s.inventory[f]);
+        const short = FAMILIES.filter((f) => (def.cost[f] ?? 0) > s.inventory[f] + (me?.pack[f] ?? 0));
         const cost = FAMILIES.filter((f) => def.cost[f]).map((f) => `${def.cost[f]} ${st.families[f].label}`).join(", ");
         return (
           <button
@@ -609,7 +740,7 @@ function BuildBar({ s, view, onPick, onTool }: { s: Snapshot; view: View; onPick
       <span className="sep" aria-hidden="true" />
       {(["harvest", "inspect", "demolish", "mark"] as Tool[]).map((t) => (
         <button key={t} type="button" className={`tool ${view.tool === t ? "on" : ""}`} aria-pressed={view.tool === t} onClick={() => onTool(t)}>
-          {{ harvest: "Harvest (E)", inspect: "Inspect (I)", demolish: "Take down (X)", mark: "Name (N)", build: "" }[t]}
+          {{ harvest: "Harvest (E)", inspect: "Inspect (I)", demolish: "Take down (X)", mark: "Name (N)", build: "", god: "" }[t]}
         </button>
       ))}
     </div>
@@ -670,9 +801,12 @@ function Help({ onClose, st }: { onClose: () => void; st: (typeof STAGES)[number
           <li><kbd>WASD</kbd> or arrows: walk. Wheel or <kbd>+</kbd>/<kbd>-</kbd>: zoom.</li>
           <li><kbd>E</kbd>/<kbd>Space</kbd> (hold): harvest whatever's in reach, or help raise a building site. Or click a deposit.</li>
           <li><kbd>1</kbd>–<kbd>6</kbd>: pick a building. A ghost shows where it goes and why it can't. Click, or <kbd>Enter</kbd> for the tile you face. <kbd>Esc</kbd> cancels.</li>
-          <li><kbd>I</kbd> inspect · <kbd>X</kbd> take down (half back) · <kbd>N</kbd> name a place · <kbd>V</kbd> survey the remaining stock · <kbd>P</kbd> photo · <kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>6</kbd> emote.</li>
+          <li><kbd>I</kbd> inspect · <kbd>X</kbd> take down (half back) · <kbd>N</kbd> name a place · <kbd>G</kbd> deposit your pack · <kbd>V</kbd> survey the remaining stock · <kbd>P</kbd> photo · <kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>6</kbd> emote.</li>
         </ul>
-        <p>Everything you gather goes into the room's shared stockpile. Buildings remember who built them; only the builder or the host can take one down.</p>
+        <p>What you gather by hand goes into your own pack. Building spends your pack first and the shared stockpile after it; machines fill the stockpile and run on it, so deposit what they need.</p>
+        <p>Tools are made from your pack and make your own harvesting quicker: a Cutter, a Pick and a Scoop, one for each kind of stock. A rough one can be made anywhere; a fine one needs you beside finished homes. You keep them from world to world.</p>
+        <p>Buildings remember who built them; only the builder or the host can take one down.</p>
+        <p>In a world hosted with gods, someone here becomes a god every 30 seconds. A god can raise a datacentre for nothing, put a bomb down, plant new stock, or lay an aura that doubles everyone else's harvesting speed for 5 seconds. The host can turn gods off and on.</p>
         <p>When every deposit on this world is gone, the room moves on together. There are five worlds.</p>
         <p><strong>{st.name}:</strong> {MECHANIC_HINT[st.mechanic]}</p>
         <button type="button" onClick={onClose} autoFocus>Back to the world</button>

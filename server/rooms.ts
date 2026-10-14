@@ -39,12 +39,12 @@ const rooms = new Map<string, LiveRoom>();
 export const stats = { tickMsMax: 0, tickMsLast: 0, bytesOut: 0, msgsIn: 0 };
 
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-export function createNewRoom(pace: Pace): string {
+export function createNewRoom(pace: Pace, gods = false): string {
   let code = "";
   do {
     code = Array.from(randomBytes(5), (b) => ALPHABET[b % ALPHABET.length]).join("");
   } while (roomExists(code));
-  const s = createRoom(code, randomBytes(4).readUInt32LE(0), pace);
+  const s = createRoom(code, randomBytes(4).readUInt32LE(0), pace, gods);
   saveRoom(s);
   return code;
 }
@@ -122,7 +122,7 @@ function flush(r: LiveRoom): void {
       moves.push([p.id, r2(x), r2(y), dx, dy, facing]);
     }
   }
-  const any = players.length || moves.length || ch.tiles.size || ch.buildings.size || ch.removed.length || ch.meta || ch.log;
+  const any = players.length || moves.length || ch.blasts.length || ch.tiles.size || ch.buildings.size || ch.removed.length || ch.meta || ch.log;
   if (!any) return;
   s.seq++;
   const d: Delta = { t: "delta", seq: s.seq, gen: s.gen, tick: s.tick, players };
@@ -131,13 +131,14 @@ function flush(r: LiveRoom): void {
   if (ch.buildings.size) d.buildings = s.buildings.filter((b) => ch.buildings.has(b.id));
   if (ch.removed.length) d.removed = ch.removed;
   if (ch.meta) {
-    d.meta = { inventory: s.inventory, ledger: s.ledger, econ: s.econ, heat: s.heat, reserve: s.reserve, phase: s.phase, hostId: s.hostId };
+    d.meta = { inventory: s.inventory, ledger: s.ledger, econ: s.econ, heat: s.heat, reserve: s.reserve, phase: s.phase, hostId: s.hostId, god: s.god, bombs: s.bombs, auras: s.auras };
     // the archive and history only ever grow: resend them only when they have
     if (s.archive.length !== r.sentArchive) d.meta.archive = s.archive;
     if (s.history.length !== r.sentHistory) d.meta.history = s.history;
     r.sentArchive = s.archive.length;
     r.sentHistory = s.history.length;
   }
+  if (ch.blasts.length) d.blasts = ch.blasts;
   if (ch.log) d.log = s.log.slice(-ch.log);
   r.dirty = true;
   r.ch = newChanges();

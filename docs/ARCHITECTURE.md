@@ -43,12 +43,12 @@ Every command is validated server-side: session (the socket's player), membershi
 
 ## Protocol
 
-Defined in [`shared/protocol.ts`](../shared/protocol.ts), JSON text frames, `PROTOCOL_VERSION = 1`. A client and server on different versions refuse each other ("this page is out of date: reload it").
+Defined in [`shared/protocol.ts`](../shared/protocol.ts), JSON text frames, `PROTOCOL_VERSION = 3`. A client and server on different versions refuse each other ("this page is out of date: reload it").
 
 Client to server:
 
 - `hello {v, room, token?, name}`: join; a known token resumes that player, anything else makes a new one
-- `cmd {id, inc, gen, c}`: an intention (`move`, `harvest`, `build`, `demolish`, `emote`, `mark`) with a client-chosen id, the room incarnation and the stage generation it was meant for
+- `cmd {id, inc, gen, c}`: an intention (`move`, `harvest`, `build`, `demolish`, `emote`, `mark`, `craft`, `deposit`, `god`, `gods`, `stop`) with a client-chosen id, the room incarnation and the stage generation it was meant for
 - `sync`: ask for a fresh snapshot
 - `ping {n}`
 
@@ -74,7 +74,7 @@ Server to client:
 ## Persistence
 
 - **Store**: `DATA_DIR/plenty.db` (SQLite, WAL), table `rooms(code, schema, state, saved_at)`, the whole `RoomState` as JSON. World, sequence and receipts are in one row, so they can't disagree about what was applied.
-- **Schema**: `SCHEMA_VERSION` in each row; migrations run in order against `PRAGMA user_version` at boot (`server/store.ts`). A row from a different schema version refuses to load rather than load wrongly.
+- **Schema**: `SCHEMA_VERSION` in each row; migrations run in order against `PRAGMA user_version` at boot (`server/store.ts`). A saved room from schema 1 is upgraded as it loads (players gain an empty pack and no tools) and from schema 2 (gods, switched off); any other version refuses to load rather than load wrongly.
 - **Save frequency**: every 5 s while a room has changed, immediately when a room empties, immediately at every stage boundary (before anyone is told about it), and for every room on SIGTERM or SIGINT.
 - **Maximum rollback**: 5 s of play after an abrupt crash. A rolled-back command's receipt rolls back with it, so a retry after recovery is treated as new, not wrongly acknowledged as done. The spec kills the server with SIGKILL to check this.
 - **Transitions survive crashes**: the transition state is saved before it's announced, and the next world is a pure function of the saved seed and stage, so a restart during a transition finishes it exactly once with the same map and no doubled carryover.

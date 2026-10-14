@@ -138,7 +138,8 @@ const server = createServer(async (req, res) => {
         return json(res, 400, { error: "malformed JSON" });
       }
       const pace = paceOf((body as { pace?: unknown } | null)?.pace);
-      return json(res, 201, { code: createNewRoom(pace), pace });
+      const gods = (body as { gods?: unknown } | null)?.gods === true;
+      return json(res, 201, { code: createNewRoom(pace, gods), pace, gods });
     }
     if (req.method === "GET" || req.method === "HEAD") {
       if (await serveStatic(url.pathname, res)) return;

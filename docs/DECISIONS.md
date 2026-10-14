@@ -20,7 +20,9 @@ Plenty keeps Hearth's attachment through landmarks, player-named places and wild
 - **Canvas 2D, procedural art.** Fastest route to a consistent original look; one file to replace. PixiJS is the upgrade path if needed.
 - **No collisions for avatars.** Players walk through everything; tall buildings turn translucent when someone's behind them. This rules out obstructed routes and trapped deposits entirely, at the cost of a little physicality.
 - **Buildings can't cover a deposit that still has stock.** Combined with walk-anywhere, no deposit is ever unreachable, so exhaustion is always achievable.
-- **A single shared stockpile.** Cooperation and tension both come from it; ownership is kept for recognition and demolition rights only.
+- **A shared stockpile, and a pack each.** Machines fill and drain the stockpile, so cooperation and tension still come from it; hand harvests go to the harvester's pack, which only they can spend, craft from or deposit. Nobody can take from the stockpile into a pack, so there is nothing to hoard out of it.
+- **Tools speed the swing, not the bite.** A tool shortens the cooldown for one family and leaves the yield alone, so the hand-harvest-only path that must always finish a stage is unchanged and nothing new touches the ledger. They cost the families they don't harvest, so the first one is always reachable with bare hands.
+- **Gods are opt-in per room and one switch for the host.** They break the game's one-way arithmetic on purpose (stock can be planted, built things can be blown up), so a room only has them if its host asked, and the host can end it. A god's turn is 30 seconds and passes to someone else, so nobody holds the power.
 - **Three resource families relabelled per world.** One economy to balance and learn, five sets of names and looks.
 - **Inventory doesn't carry between worlds; the Bottled Sun does.** Each world opens with a small starter crate, so balance is predictable per stage, and the one carryover is the one the prompt makes consequential: the Sun's energy.
 - **No readiness vote at transitions.** The server moves the room on after a fixed pause, so no absent player can block it.

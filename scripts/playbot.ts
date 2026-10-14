@@ -115,7 +115,7 @@ setInterval(() => {
   }
   if (next) {
     const def = BUILDINGS[next];
-    const affordable = Object.entries(def.cost).every(([f, v]) => s!.inventory[f as keyof Snapshot["inventory"]] >= (v ?? 0));
+    const affordable = Object.entries(def.cost).every(([f, v]) => s!.inventory[f as keyof Snapshot["inventory"]]  >= (v ?? 0));
     if (affordable) {
       const spot = spotFor(next, me);
       if (spot) {
@@ -128,6 +128,8 @@ setInterval(() => {
       }
     }
   }
+  // machines run on the stockpile: hand over a full pack so furnaces and datacentres aren't starved
+  if (me.pack.matter + me.pack.mineral + me.pack.coolant >= 10) send({ k: "deposit" });
   // otherwise harvest the nearest deposit (or help raise a site)
   let best = -1;
   let bd = Infinity;

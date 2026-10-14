@@ -138,6 +138,10 @@ export class Sound {
     this.tone(140, 0.25, "effects", "square", 0.08, -60);
     setTimeout(() => this.tone(220, 0.2, "effects", "triangle", 0.12), 90);
   }
+  blast(): void {
+    this.tone(70, 0.6, "effects", "sawtooth", 0.2, -50);
+    this.tone(45, 0.9, "effects", "square", 0.12, -25);
+  }
   reject(): void {
     this.tone(160, 0.2, "effects", "sawtooth", 0.06, -40);
   }

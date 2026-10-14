@@ -232,7 +232,10 @@ export class GameClient {
     if (d.log) {
       // a folded line ("called Lightning 14 times") comes again under the same id: replace it
       const byId = new Map(s.log.map((l) => [l.id, l]));
-      for (const l of d.log) byId.set(l.id, l);
+      for (const l of d.log) {
+        if (l.was !== undefined) byId.delete(l.was);
+        byId.set(l.id, l);
+      }
       s.log = [...byId.values()].sort((a, b) => a.id - b.id).slice(-40) as LogEntry[];
     }
     this.bump();

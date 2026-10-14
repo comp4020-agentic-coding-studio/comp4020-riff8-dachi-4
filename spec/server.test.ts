@@ -32,7 +32,12 @@ class Bot {
         this.token = m.token;
       }
       if (m.t === "delta" && this.snap) {
-        for (const [i, t] of m.tiles ?? []) this.snap.tiles[i] = t;
+        if (m.summaries) this.snap.summaries = m.summaries;
+        if (m.meta) Object.assign(this.snap, m.meta);
+        if (m.vw === this.snap.viewing) {
+          for (const [i, t] of m.tiles ?? []) this.snap.tiles[i] = t;
+          if (m.world) Object.assign(this.snap, m.world);
+        }
         for (const p of m.players) this.snap.players[p.id] = p;
         for (const [id, x, y] of m.moves ?? []) Object.assign(this.snap.players[id] ?? {}, { x, y });
       }
@@ -56,7 +61,7 @@ class Bot {
   }
 
   cmd(c: Command, id = `t${this.n++}`, inc = this.inc): string {
-    this.send({ t: "cmd", id, inc, gen: this.snap!.gen, c });
+    this.send({ t: "cmd", id, inc, gen: this.snap!.gen, c, w: this.snap!.viewing });
     return id;
   }
 
@@ -80,8 +85,8 @@ class Bot {
 
 const originOf = (url: string): string => new URL(url).origin;
 
-async function newRoom(url: string, pace = "normal"): Promise<string> {
-  const res = await fetch(new URL("/api/rooms", url), { method: "POST", headers: { origin: originOf(url), "content-type": "application/json" }, body: JSON.stringify({ pace }) });
+async function newRoom(url: string, pace = "normal", extra: Record<string, unknown> = {}): Promise<string> {
+  const res = await fetch(new URL("/api/rooms", url), { method: "POST", headers: { origin: originOf(url), "content-type": "application/json" }, body: JSON.stringify({ pace, ...extra }) });
   expect(res.status).toBe(201);
   return ((await res.json()) as { code: string }).code;
 }
@@ -92,6 +97,27 @@ async function joined(url: string, room: string, name: string, token?: string): 
   b.hello(room, name, token);
   await b.until((m) => m.t === "welcome");
   return b;
+}
+
+/** Walk a bot next to the nearest tile matching `pred` (by moving its intent and waiting). */
+async function walkTo(b: Bot, pred: (t: Snapshot["tiles"][number], k: number) => boolean, close = 1.2): Promise<void> {
+  // re-aim every step: in a cosmos room the bots may take the target first
+  for (let step = 0; step < 120; step++) {
+    const s = b.snap!;
+    const p = s.players[b.you];
+    let best = -1;
+    let bd = Infinity;
+    s.tiles.forEach((t, k) => {
+      if (!pred(t, k)) return;
+      const d = Math.hypot((k % s.w) - p.x, Math.floor(k / s.w) - p.y);
+      if (d < bd) [bd, best] = [d, k];
+    });
+    if (best < 0 || bd < close) break;
+    b.cmd({ k: "move", dx: (best % s.w) - p.x, dy: Math.floor(best / s.w) - p.y });
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  b.cmd({ k: "move", dx: 0, dy: 0 });
+  await new Promise((r) => setTimeout(r, 250));
 }
 
 /** Walk a bot next to the nearest deposit (by moving its intent and waiting). */
@@ -210,6 +236,119 @@ describe("real time", () => {
   });
 });
 
+describe("a cosmos room, end to end", () => {
+  it("joins, picks a faction, views another world, launches, and sees a god's act land on another world", async () => {
+    const room = await newRoom(baseUrl, "rapid", { mode: "cosmos", gods: true, pick: "choose" });
+    const a = await joined(baseUrl, room, "Ada");
+    expect(a.snap!.mode).toBe("cosmos");
+    expect(a.snap!.summaries).toHaveLength(5);
+    // four bots hold the four seats until someone takes one
+    expect(Object.values(a.snap!.players).filter((p) => p.bot && p.connected)).toHaveLength(4);
+    a.cmd({ k: "faction", f: "brokers" }, "f1");
+    expect(await a.until((m) => m.t === "ack" && m.id === "f1")).toMatchObject({ ok: true });
+    await a.until((m) => m.t === "delta" && m.players.some((p) => p.id === a.you && p.faction === "brokers"));
+    // viewing is free: a fresh snapshot of Mars, and Ada is still on Earth
+    a.send({ t: "view", world: 1 });
+    const mars = (await a.until((m) => m.t === "welcome" && m.snap.viewing === 1)) as Extract<ServerMsg, { t: "welcome" }>;
+    expect(mars.snap.stage).toBe(1);
+    expect(mars.snap.players[a.you].world).toBe(0);
+    // grounded commands meant for the world you're only looking at are refused
+    a.cmd({ k: "harvest", x: 3, y: 3 }, "h-far");
+    expect(await a.until((m) => m.t === "ack" && m.id === "h-far")).toMatchObject({ ok: false, reason: expect.stringMatching(/only looking/) });
+    // back home, build a Pad from the Brokers' stockpile filled by hand, then launch
+    a.send({ t: "view", world: 0 });
+    await a.until((m) => m.t === "welcome" && m.snap.viewing === 0);
+    // one hand harvest of each stock (rapid: 10 a swing), into the Brokers' stockpile, pays for a Pad and its fuel
+    for (const f of ["matter", "mineral", "coolant"] as const) {
+      let ok = false;
+      for (let attempt = 0; attempt < 6 && !ok; attempt++) {
+        await walkTo(a, (t) => t.d === f && t.amt > 0);
+        const me = a.snap!.players[a.you];
+        const s = a.snap!;
+        const i = s.tiles.findIndex((t, k) => t.d === f && t.amt > 0 && Math.hypot((k % s.w) - me.x, Math.floor(k / s.w) - me.y) <= 2);
+        if (i < 0) continue;
+        const id = `h-${f}-${attempt}`;
+        a.cmd({ k: "harvest", x: i % s.w, y: Math.floor(i / s.w) }, id);
+        ok = ((await a.until((m) => m.t === "ack" && m.id === id)) as { ok: boolean }).ok;
+        await new Promise((r) => setTimeout(r, 900));
+      }
+      expect(ok, `harvest ${f}`).toBe(true);
+    }
+    a.cmd({ k: "deposit" }, "dep");
+    expect(await a.until((m) => m.t === "ack" && m.id === "dep")).toMatchObject({ ok: true });
+    const fresh = async (): Promise<Snapshot> => {
+      const since = a.msgs.length;
+      a.send({ t: "sync" });
+      await a.until((m) => m.t === "welcome" && a.msgs.indexOf(m) >= since);
+      return a.snap!;
+    };
+    let s = await fresh();
+    const me = s.players[a.you];
+    let built = false;
+    for (let r = 1; r < 6 && !built; r++)
+      for (let dx = -r; dx <= r && !built; dx++) {
+        const x = Math.round(me.x) + dx;
+        const y = Math.round(me.y) + r;
+        const t = s.tiles[y * s.w + x];
+        if (!t || t.d || t.b || t.t !== 0 || x < 0 || x >= s.w) continue;
+        const id = `pad-${x}-${y}`;
+        a.cmd({ k: "build", x, y, type: "pad" }, id);
+        built = ((await a.until((m) => m.t === "ack" && m.id === id)) as { ok: boolean }).ok;
+      }
+    expect(built).toBe(true);
+    await new Promise((r) => setTimeout(r, 1000));
+    s = await fresh();
+    const pad = s.buildings.find((b) => b.type === "pad" && b.f === "brokers")!;
+    await walkTo(a, (_t, k) => k === pad.y * s.w + pad.x, 1.5);
+    a.cmd({ k: "launch", x: pad.x, y: pad.y, to: 1, cargo: { matter: 0, mineral: 0, coolant: 0 } }, "go");
+    const ack = await a.until((m) => m.t === "ack" && m.id === "go");
+    expect(ack).toMatchObject({ ok: true });
+    // in flight: a ship on the map with Ada aboard, and Ada on no world
+    const flying = (await a.until((m) => m.t === "delta" && !!m.meta?.ships.some((sh) => sh.passengers.includes(a.you)))) as Delta;
+    expect(flying.meta!.ships[0].to).toBe(1);
+    await a.until((m) => m.t === "delta" && m.players.some((p) => p.id === a.you && p.world === -1));
+    a.close();
+  }, 60_000);
+
+  it("a god's act on a world nobody is viewing reaches a viewer of that world", async () => {
+    const room = await newRoom(baseUrl, "rapid", { mode: "cosmos", gods: true, pick: "choose" });
+    const a = await joined(baseUrl, room, "Ada");
+    const b = await joined(baseUrl, room, "Ben");
+    a.cmd({ k: "faction", f: "stewards" }, "fa");
+    b.cmd({ k: "faction", f: "foundry" }, "fb");
+    await a.until((m) => m.t === "ack" && m.id === "fa");
+    // Ben watches the Sun; Ada stays on Earth
+    b.send({ t: "view", world: 2 });
+    await b.until((m) => m.t === "welcome" && m.snap.viewing === 2);
+    // the fairest pick is the faction with fewest turns: bots take theirs too, so this can take a few turns.
+    // The host switching gods off and on hands out a new turn at once, without waiting out a gap.
+    const deadline = Date.now() + 55_000;
+    let god: Bot | null = null;
+    while (!god && Date.now() < deadline) {
+      const since = a.msgs.length;
+      a.send({ t: "sync" });
+      await a.until((m) => m.t === "welcome" && a.msgs.indexOf(m) >= since);
+      const g = a.snap!.god.id;
+      if (g === a.you) god = a;
+      else if (g === b.you) god = b;
+      else {
+        a.cmd({ k: "gods", on: false });
+        a.cmd({ k: "gods", on: true });
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+    expect(god).not.toBeNull();
+    god!.cmd({ k: "god", power: "bless", x: 5, y: 5, world: 2 }, "bless-sun");
+    expect(await god!.until((m) => m.t === "ack" && m.id === "bless-sun")).toMatchObject({ ok: true });
+    const seen = await b.until((m) => m.t === "delta" && m.vw === 2 && !!m.world?.blessings.length);
+    expect(seen.t).toBe("delta");
+    // and Ada, on Earth, sees it on the map's summary
+    await a.until((m) => m.t === "delta" && !!m.summaries?.[2]?.blessings);
+    a.close();
+    b.close();
+  }, 70_000);
+});
+
 describe("persistence", () => {
   // A private server against its own data directory, so it can be killed.
   const dir = mkdtempSync(join(tmpdir(), "plenty-"));
@@ -278,4 +417,41 @@ describe("persistence", () => {
     back.close();
     await stop(p, "SIGTERM");
   }, 45_000);
+
+  it("loads a classic room saved before cosmos (schema 3) as classic, gods off, with its world intact", async () => {
+    // write a schema-3 row by hand, the shape main and packs-tools-gods saved
+    const { DatabaseSync } = await import("node:sqlite");
+    const g = (await import("../shared/worldgen.ts")).generateStage(77, 0);
+    const ledger = { matter: { initial: 0, remaining: 0, extracted: 0, destroyed: 0 }, mineral: { initial: 0, remaining: 0, extracted: 0, destroyed: 0 }, coolant: { initial: 0, remaining: 0, extracted: 0, destroyed: 0 } };
+    for (const t of g.tiles) if (t.d) {
+      ledger[t.d].initial += t.init;
+      ledger[t.d].remaining += t.amt;
+    }
+    const old = {
+      v: 3, code: "OLDRM", seed: 77, pace: "normal", hostId: "p1", tick: 500, seq: 9, gen: 1, stage: 0, stageStartTick: 0, lifeStart: 90, econTicks: 50,
+      phase: { k: "play" }, w: 24, tiles: g.tiles, buildings: g.buildings, nextBuildingId: g.buildings.length + 1,
+      inventory: { matter: 5, mineral: 3, coolant: 1 }, ledger, econ: { energySupply: 0, energyUsed: 0, computeSupply: 0, computeUsed: 0, workersSupply: 0, workersUsed: 0 },
+      heat: 0, reserve: 0, god: { on: true, id: "p1", until: 900, ready: 0, made: 2 }, bombs: [{ id: 1, x: 3, y: 3, at: 600, by: "Ada" }], auras: [], history: [], archive: [],
+      players: { p1: { id: "p1", name: "Ada", colour: 0, x: 11, y: 11, dx: 0, dy: 0, facing: 2, act: null, connected: true, joinedTick: 0, nextHarvest: 0, nextEmote: 0, marks: 0, pack: { matter: 2, mineral: 0, coolant: 0 }, tools: { matter: 1, mineral: 0, coolant: 0 }, stats: { harvested: 2, built: 0, helped: 0 } } },
+      tokens: { p1: "old-token" }, receipts: { p1: [] }, log: [{ tick: 1, text: "Ada arrived." }],
+    };
+    const p0 = await boot();
+    await stop(p0, "SIGTERM");
+    const db = new DatabaseSync(join(dir, "plenty.db"));
+    db.prepare("INSERT INTO rooms (code, schema, state, saved_at, players) VALUES (?, 3, ?, ?, 1)").run("OLDRM", JSON.stringify(old), Date.now());
+    db.close();
+    const p = await boot();
+    const back = await joined(url, "OLDRM", "Ada", "old-token");
+    expect(back.you).toBe("p1");
+    const s = back.snap!;
+    expect(s.mode).toBe("classic");
+    expect(s.god.on).toBe(false);
+    expect(s.inventory).toEqual({ matter: 5, mineral: 3, coolant: 1 });
+    expect(s.players.p1.pack.matter).toBe(2);
+    expect(s.players.p1.tools.matter).toBe(1);
+    expect(s.tiles).toHaveLength(24 * 24);
+    expect(s.strikes).toEqual([]);
+    back.close();
+    await stop(p, "SIGTERM");
+  }, 30_000);
 });

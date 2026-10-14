@@ -107,6 +107,8 @@ export function loadRoom(code: string): RoomState | null {
     s.nextShipId = 1;
     s.transit = { launched: { matter: 0, mineral: 0, coolant: 0 }, landed: { matter: 0, mineral: 0, coolant: 0 } };
     s.computeTotal = 0;
+    s.lifeSum = 0;
+    s.lifeN = 0;
     s.factions = {};
     s.logId = 0;
     s.log = s.log.map((l) => ({ ...l, id: ++s.logId }));

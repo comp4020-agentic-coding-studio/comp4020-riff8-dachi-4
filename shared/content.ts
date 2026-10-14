@@ -567,17 +567,18 @@ export const FACTIONS: Record<FactionId, FactionDef> = {
     passive: "Furnaces give double power on the same fuel.",
     unique: "smelter",
     uniqueText: "Smelter: turns 3 matter into 1 mineral each tick.",
-    weakness: "Furnace smoke reaches one tile further, and it browns land everyone shares.",
+    weakness: "Furnace smoke reaches one tile further, and it browns land everyone shares. Builds no Launch Pads: it rides other people's.",
     goal: "its share of everything taken from every world, by hand or machine",
     needs: "Needs Brokers to carry its output off Earth. Threatens the Stewards' land.",
     colour: "#d9653b",
     shape: "square",
     dash: [10, 4],
-    par: 0.3,
+    par: 0.47,
     costs: {},
     fuel: 1,
     hands: 1,
-    cannot: [],
+    // "needs Brokers to carry its output off Earth": it rides other people's Pads
+    cannot: ["pad"],
   },
   automata: {
     id: "automata",
@@ -586,17 +587,18 @@ export const FACTIONS: Record<FactionId, FactionDef> = {
     passive: "Harvesters cost a quarter less.",
     unique: "seeder",
     uniqueText: "Seeder: a harvester that places copies of itself, up to 12 a world.",
-    weakness: "Hand harvesting is half as fast. Needs power and compute from someone.",
-    goal: "its share of all compute supplied, in compute-ticks",
+    weakness: "Hand harvesting is half as fast. Builds no power of its own: needs someone's Furnace or Sun Garden.",
+    goal: "the compute its machines supply, in compute-ticks",
     needs: "Needs the Foundry's power. Its machines drink the water everyone shares.",
     colour: "#4f8fd9",
     shape: "circle",
     dash: [2, 4],
-    par: 0.5,
+    par: 780,
     costs: { extractor: 0.75, seeder: 0.75 },
     fuel: 1,
     hands: 2,
-    cannot: [],
+    // "needs power and compute from someone": it raises no power of its own
+    cannot: ["furnace", "solar"],
   },
   brokers: {
     id: "brokers",
@@ -611,7 +613,7 @@ export const FACTIONS: Record<FactionId, FactionDef> = {
     colour: "#c9a227",
     shape: "triangle",
     dash: [12, 4, 2, 4],
-    par: 40,
+    par: 280,
     costs: { pad: 0.5 },
     fuel: 0.5,
     hands: 1,
@@ -625,12 +627,12 @@ export const FACTIONS: Record<FactionId, FactionDef> = {
     unique: "reserve",
     uniqueText: "Reserve: locks a deposit and its neighbours from harvest for 60 seconds.",
     weakness: "Hand harvesting is a quarter slower. Can't build Furnaces.",
-    goal: "the average life of the land across the five worlds, taken as each ended or as it stands",
+    goal: "how alive the land stays on the worlds it reaches, against how it began, across five worlds over the campaign",
     needs: "Needs the others to slow down or stop. Threatens everyone's harvest.",
     colour: "#3f9f6a",
     shape: "diamond",
     dash: [6, 6],
-    par: 40,
+    par: 20,
     costs: { solar: 0.7 },
     fuel: 1,
     hands: 1.25,
@@ -641,7 +643,7 @@ export const FACTIONS: Record<FactionId, FactionDef> = {
 export const UNIQUE: Partial<Record<BuildingType, { only?: FactionId; othersPay?: number }>> = {
   smelter: { only: "foundry" },
   seeder: { only: "automata" },
-  pad: { othersPay: 2 },
+  pad: { othersPay: 1.5 },
 };
 export const SMELTER_IN = 3;
 export const SEEDER_EVERY = 6; // economy ticks between copies
@@ -649,7 +651,7 @@ export const SEEDER_CAP = 12; // per world
 export const RESERVE_TICKS = 600; // 60 s
 export const RESERVE_REST_TICKS = 600;
 export const RESERVE_RADIUS = 1;
-export const RESERVE_COST: Bundle = { matter: 4, mineral: 2, coolant: 0 };
+export const RESERVE_COST: Bundle = { matter: 6, mineral: 4, coolant: 0 };
 /** the faction furthest from its par pays this much less fuel; 0 turns the lever off */
 export const CATCH_UP_FUEL = 0.25;
 /** a faction left without a human is played by its bot again after this long */

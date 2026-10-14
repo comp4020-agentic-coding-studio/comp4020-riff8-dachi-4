@@ -27,34 +27,37 @@ import { rng } from "./worldgen.ts";
 /** What each faction builds on each world, in order, until it can't afford the next thing. */
 const PLANS: Record<FactionId, Record<string, BuildingType[]>> = {
   foundry: {
-    earth: ["city", "furnace", "pad", "extractor", "furnace", "smelter", "extractor", "city", "furnace", "extractor", "extractor", "datacentre"],
+    earth: ["city", "furnace", "extractor", "furnace", "smelter", "extractor", "city", "furnace", "extractor", "extractor", "datacentre"],
     mars: ["habitat", "solar", "city", "extractor", "smelter", "extractor", "habitat", "extractor"],
     sun: ["solar", "radiator", "city", "extractor", "extractor", "smelter", "radiator", "extractor", "extractor"],
     system: ["city", "relay", "relay", "extractor", "extractor", "smelter", "extractor"],
     universe: ["city", "extractor", "extractor", "smelter", "extractor"],
   },
   automata: {
-    earth: ["city", "solar", "datacentre", "extractor", "seeder", "datacentre", "city", "extractor", "datacentre"],
-    mars: ["habitat", "solar", "solar", "datacentre", "seeder", "datacentre", "habitat", "extractor"],
-    sun: ["solar", "datacentre", "radiator", "seeder", "datacentre", "radiator", "extractor"],
+    earth: ["city", "datacentre", "extractor", "seeder", "datacentre", "city", "extractor", "datacentre", "pad"],
+    mars: ["habitat", "datacentre", "seeder", "datacentre", "habitat", "extractor"],
+    sun: ["datacentre", "radiator", "seeder", "datacentre", "radiator", "extractor"],
     system: ["city", "datacentre", "relay", "relay", "seeder", "datacentre", "extractor"],
     universe: ["city", "datacentre", "datacentre", "seeder", "datacentre"],
   },
   brokers: {
-    earth: ["pad", "city", "solar", "pad", "datacentre", "plaza"],
-    mars: ["pad", "habitat", "solar", "city", "pad"],
-    sun: ["pad", "solar", "city", "radiator", "pad"],
+    earth: ["pad", "city", "pad", "plaza"],
+    mars: ["pad", "habitat", "city", "pad"],
+    sun: ["pad", "city", "radiator", "pad"],
     system: ["pad", "city", "relay", "pad"],
     universe: ["pad", "city", "pad"],
   },
   stewards: {
-    earth: ["solar", "city", "plaza", "solar", "datacentre"],
-    mars: ["habitat", "solar", "city", "plaza"],
-    sun: ["solar", "radiator", "city", "plaza"],
+    earth: ["city", "plaza", "plaza", "pad"],
+    mars: ["habitat", "city", "plaza"],
+    sun: ["radiator", "city", "plaza"],
     system: ["city", "relay", "plaza"],
     universe: ["city", "plaza"],
   },
 };
+
+/** How much of a world is left when each faction's bot looks for the next one. */
+const LEAVE_AT: Record<FactionId, number> = { foundry: 0.75, automata: 0.3, brokers: 0.3, stewards: 0.6 };
 
 /** Where each faction would rather be, in order. */
 const ROUTE: Record<FactionId, string[]> = {
@@ -75,13 +78,16 @@ const walk = (p: Player, x: number, y: number, close = 1.2): Extract<Command, { 
   return { k: "move", dx: (x - p.x) / d, dy: (y - p.y) / d };
 };
 
+/** The deposit worth walking to: near, and of what the faction is shortest of here (machines drink coolant). */
 function nearestDeposit(s: RoomState, w: World, p: Player): number {
+  const have = p.faction ? (w.stock[p.faction] ?? { matter: 0, mineral: 0, coolant: 0 }) : { matter: 0, mineral: 0, coolant: 0 };
+  const want = (f: Family): number => 1 / (1 + have[f] + p.pack[f]);
   let best = -1;
   let bd = Infinity;
   w.tiles.forEach((t, i) => {
     if (!t.d || t.amt <= 0 || lockProblem(w, i, s.tick)) return;
     const [x, y] = at(w, i);
-    const d = dist(x, y, p.x, p.y);
+    const d = dist(x, y, p.x, p.y) * (1.2 - want(t.d));
     if (d < bd) [bd, best] = [d, i];
   });
   return best;
@@ -148,10 +154,13 @@ function nextWorld(s: RoomState, p: Player, f: FactionId): number | null {
       .filter(([w, wi]) => !w.spent && wi !== p.world && !hasPad(wi) && Object.values(s.players).some((q) => q.connected && q.world === wi && q.faction !== "brokers"));
     return busy.length ? busy[0][1] : null;
   }
-  if (!here.spent && frac(here) > 0.3) return null;
+  // Burn it: the Foundry heads for the Sun early; Stewards go where they haven't been yet
+  if (!here.spent && frac(here) > LEAVE_AT[f]) return null;
   for (const id of ROUTE[f]) {
     const wi = s.worlds.findIndex((w) => STAGES[w.stage].id === id);
-    if (wi >= 0 && wi !== p.world && !s.worlds[wi].spent && frac(s.worlds[wi]) > 0.3) return wi;
+    if (wi < 0 || wi === p.world || s.worlds[wi].spent || frac(s.worlds[wi]) <= 0.3) continue;
+    if (f === "stewards" && s.worlds[wi].landed.includes(f) && s.worlds.some((w) => !w.spent && !w.landed.includes(f))) continue;
+    return wi;
   }
   return null;
 }
@@ -175,8 +184,8 @@ export function planBot(s: RoomState, pid: string, r: () => number): Command[] {
   const dest = nextWorld(s, p, f);
   if (dest !== null) {
     const pads = w.buildings.filter((b) => b.type === "pad" && done(b));
-    // a Broker's Pad first, then anyone's: they're open to all
-    pads.sort((a, b) => Number(b.f === "brokers") - Number(a.f === "brokers") || dist(a.x, a.y, p.x, p.y) - dist(b.x, b.y, p.x, p.y));
+    // the nearest Pad: they're open to everyone, whoever built them
+    pads.sort((a, b) => dist(a.x, a.y, p.x, p.y) - dist(b.x, b.y, p.x, p.y));
     const pad = pads[0];
     if (pad) {
       const fuel = fuelFor(s, f);
@@ -188,12 +197,31 @@ export function planBot(s: RoomState, pid: string, r: () => number): Command[] {
         room -= cargo[fam];
       }
       const c = { k: "launch" as const, x: pad.x, y: pad.y, to: dest, cargo };
-      const plan = launchPlan(s, p, c);
-      if (plan.ok) return [{ k: "move", dx: 0, dy: 0 }, c];
-      if (plan.reason.startsWith("stand beside")) {
+      // only walk to the Pad if the launch would go once there: otherwise it dithers between Pad and work
+      if (launchPlan(s, { ...p, x: pad.x, y: pad.y }, c).ok) {
+        if (launchPlan(s, p, c).ok) return [{ k: "move", dx: 0, dy: 0 }, c];
         const m = walk(p, pad.x, pad.y, 1.5);
         if (m) return [m];
       }
+    }
+  }
+
+  // send surplus ahead to where the faction means to go next, through someone's Pad: what Brokers live on
+  if (f !== "brokers" && r() < 0.08) {
+    const surplus = FAMILIES.reduce((a, fam) => a + stock[fam], 0);
+    const ahead = ROUTE[f].map((id) => s.worlds.findIndex((x) => STAGES[x.stage].id === id)).find((wi) => wi >= 0 && wi !== p.world && !s.worlds[wi].spent);
+    const pad = w.buildings.filter((b) => b.type === "pad" && done(b)).sort((a, b) => dist(a.x, a.y, p.x, p.y) - dist(b.x, b.y, p.x, p.y))[0];
+    if (surplus > 60 && ahead !== undefined && pad && dist(pad.x, pad.y, p.x, p.y) < 4) {
+      const fuel = fuelFor(s, f);
+      const cargo = { matter: 0, mineral: 0, coolant: 0 };
+      let room = SHIP_CARGO;
+      for (const fam of FAMILIES) {
+        const spare = Math.max(0, Math.floor((stock[fam] - fuel[fam] - 20) / 2));
+        cargo[fam] = Math.min(spare, room);
+        room -= cargo[fam];
+      }
+      const c = { k: "launch" as const, x: pad.x, y: pad.y, to: ahead, cargo, go: false };
+      if (launchPlan(s, p, c).ok) return [c];
     }
   }
 
@@ -234,6 +262,12 @@ export function planBot(s: RoomState, pid: string, r: () => number): Command[] {
     }
   }
 
+  // Brokers earn on other people's consumption, and Stewards keep some back: both gather only toward their next building
+  if (f === "brokers" || f === "stewards") {
+    const next = nextBuild(s, w, f);
+    const cost = next ? costOf(next, f) : null;
+    if (!cost || FAMILIES.every((fam) => stock[fam] + p.pack[fam] >= cost[fam])) return out;
+  }
   // otherwise gather by hand
   const i = nearestDeposit(s, w, p);
   if (i < 0) return out;

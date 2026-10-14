@@ -149,7 +149,7 @@ function flush(r: LiveRoom): void {
   const base: Delta = { t: "delta", seq: s.seq, gen: s.gen, tick: s.tick, players, vw: 0 };
   if (moves.length) base.moves = moves;
   if (ch.meta) {
-    base.meta = { reserve: s.reserve, phase: s.phase, hostId: s.hostId, god: s.god, ships: s.ships, factions: s.factions, computeTotal: s.computeTotal, transit: s.transit };
+    base.meta = { reserve: s.reserve, phase: s.phase, hostId: s.hostId, god: s.god, ships: s.ships, factions: s.factions, computeTotal: s.computeTotal, transit: s.transit, lifeSum: s.lifeSum, lifeN: s.lifeN };
     // the archive and history only ever grow: resend them only when they have
     if (s.archive.length !== r.sentArchive) base.meta.archive = s.archive;
     if (s.history.length !== r.sentHistory) base.meta.history = s.history;

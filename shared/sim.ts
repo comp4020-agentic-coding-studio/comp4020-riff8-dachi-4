@@ -203,6 +203,8 @@ export function createRoom(code: string, seed: number, pace: Pace, gods = false,
     nextShipId: 1,
     transit: { launched: emptyBundle(), landed: emptyBundle() },
     computeTotal: 0,
+    lifeSum: 0,
+    lifeN: 0,
     factions: {},
     history: [],
     archive: [],
@@ -236,13 +238,19 @@ export const spawnPoint = (stage: number): { x: number; y: number } => {
 /** The world a player stands on, or null in flight. */
 export const worldOf = (s: RoomState, p: Pick<Player, "world">): World | null => (p.world >= 0 ? (s.worlds[p.world] ?? null) : null);
 
+/**
+ * Add a line to the log. A folded line (a god's repeated acts) replaces the
+ * earlier line with the same key, moved to the end with its count, so a turn
+ * of hundreds of acts is a handful of lines, not a flood.
+ */
 function log(s: RoomState, ch: Changes, text: string, fold?: { key: string; many: (n: number) => string }): void {
-  const last = s.log.at(-1);
-  if (fold && last && last.key === fold.key) {
-    last.n = (last.n ?? 1) + 1;
-    last.text = fold.many(last.n);
-    last.tick = s.tick;
-    ch.logIds.add(last.id);
+  const prev = fold ? s.log.findIndex((l) => l.key === fold.key) : -1;
+  if (fold && prev >= 0) {
+    const [old] = s.log.splice(prev, 1);
+    const n = (old.n ?? 1) + 1;
+    const e = { id: ++s.logId, tick: s.tick, text: fold.many(n), key: fold.key, n, was: old.id };
+    s.log.push(e);
+    ch.logIds.add(e.id);
     return;
   }
   const e = { id: ++s.logId, tick: s.tick, text, ...(fold ? { key: fold.key, n: 1 } : {}) };
@@ -478,7 +486,7 @@ export function buildable(s: Pick<RoomState, "mode">, w: Pick<World, "stage">, f
   const st = STAGES[w.stage];
   if (s.mode !== "cosmos") return st.buildings;
   const out = st.buildings.filter((t) => !(f && FACTIONS[f].cannot.includes(t)));
-  out.push("pad");
+  if (!(f && FACTIONS[f].cannot.includes("pad"))) out.push("pad");
   if (f === "foundry") out.push("smelter");
   if (f === "automata" && st.buildings.includes("extractor")) out.push("seeder");
   return out;
@@ -1146,7 +1154,7 @@ function godAct(s: RoomState, p: Player, c: Extract<Command, { k: "god" }>, ch: 
   const tile = w.tiles[idx];
   const cw = wc(ch, wi);
   const name = powerName(st, c.power);
-  const fold = { key: `${p.id}:${c.power}:${wi}`, many: (n: number) => `${p.name}, a god, called ${name} ${n} times on ${st.name}.` };
+  const fold = { key: `${p.id}:${p.god.turns}:${c.power}:${wi}`, many: (n: number) => `${p.name}, a god, called ${name} ${n} times on ${st.name}.` };
   let where = whereOn(w, c.x, c.y, 0);
   switch (c.power) {
     case "gift": {
@@ -1274,7 +1282,8 @@ function crown(s: RoomState, ch: Changes, until: number): void {
     next.god.turns++;
     s.god.last = next.id;
     s.god.aim = Math.max(0, next.world);
-    log(s, ch, `${next.name} is a god for ${Math.round(((until - s.tick) * TICK_MS) / 1000)} seconds.`);
+    const secs = Math.round(((until - s.tick) * TICK_MS) / 1000);
+    log(s, ch, until - s.tick < GOD_TURN_TICKS ? `${next.name} is a god for the rest of this turn, ${secs}s.` : `${next.name} is a god for ${secs} seconds.`);
   }
   ch.meta = true;
 }
@@ -1320,7 +1329,7 @@ function explode(s: RoomState, wi: number, strike: Strike, ch: Changes): void {
   cw.meta = true;
   const name = st.powers.strike;
   log(s, ch, down ? `${strike.by}'s ${name} landed on ${st.name} and took ${down} building${down === 1 ? "" : "s"} with it.` : `${strike.by}'s ${name} landed on ${st.name}.`, {
-    key: `land:${strike.byId}:${wi}`,
+    key: `land:${strike.byId}:${by?.god.turns ?? 0}:${wi}`,
     many: (n) => `${n} of ${strike.by}'s ${name}s have landed on ${st.name}.`,
   });
   ch.meta = true;
@@ -1332,11 +1341,18 @@ function divine(s: RoomState, ch: Changes): void {
   if (g.on) {
     const god = g.id ? s.players[g.id] : undefined;
     if (g.id && (s.tick >= g.until || !god?.connected)) {
-      if (s.tick < g.until) crown(s, ch, g.until); // replaced at once, for the rest of the turn only
+      // replaced at once, for the rest of the turn only (unless there's under a second of it left)
+      if (g.until - s.tick >= 10) crown(s, ch, g.until);
       else {
         g.id = null;
         g.next = s.tick + GOD_GAP_TICKS;
         log(s, ch, `${god?.name ?? "The god"} is mortal again.`);
+        ch.meta = true;
+      }
+      if (g.id === god?.id && s.tick < g.until) {
+        // nobody else to hand it to: the turn ends here
+        g.id = null;
+        g.next = s.tick + GOD_GAP_TICKS;
         ch.meta = true;
       }
     }
@@ -1523,7 +1539,13 @@ export function tick(s: RoomState, ch: Changes): void {
     s.ships = s.ships.filter((sh) => sh.arrives > s.tick);
     for (const sh of due) arrive(s, sh, ch);
   }
-  if (s.tick % PACES[s.pace].econEvery === 0) for (let wi = 0; wi < s.worlds.length; wi++) economy(s, wi, ch);
+  if (s.tick % PACES[s.pace].econEvery === 0) {
+    for (let wi = 0; wi < s.worlds.length; wi++) economy(s, wi, ch);
+    if (s.mode === "cosmos") {
+      s.lifeSum += relativeLife(s, "stewards");
+      s.lifeN++;
+    }
+  }
 }
 
 /** Cosmos: deal anyone who ignored the cards, and bring a bot back to a faction its humans left. */
@@ -1688,14 +1710,16 @@ function economy(s: RoomState, wi: number, ch: Changes): void {
     for (const b of built) if (blessed(b)) network.add(b.id);
   }
 
-  let supplied = engineCompute;
+  // the Automata's share counts compute a faction's machines supply; World Engines belong to nobody
+  void engineCompute;
   for (const d of of("datacentre"))
     if (take(d, { pressure })) {
       compute += BUILDINGS.datacentre.compute;
-      supplied += BUILDINGS.datacentre.compute;
-      if (cosmos && d.f) s.factions[d.f]!.compute += BUILDINGS.datacentre.compute;
+      if (cosmos && d.f) {
+        s.factions[d.f]!.compute += BUILDINGS.datacentre.compute;
+        s.computeTotal += BUILDINGS.datacentre.compute;
+      }
     }
-  if (cosmos) s.computeTotal += supplied;
   const computeSupply = compute;
   for (const r of of("radiator")) take(r);
 
@@ -1852,12 +1876,25 @@ export function measure(s: RoomState, f: FactionId): number {
       return all ? fs.took / all : 0;
     }
     case "automata":
-      return s.computeTotal ? fs.compute / s.computeTotal : 0;
+      // "in compute-ticks": the compute its own machines supplied, counted, not a fraction
+      return fs.compute;
     case "brokers":
       return fs.carried;
     case "stewards":
-      return Math.round(s.worlds.reduce((a, w) => a + (w.spent ? (w.lifeEnd ?? averageLife(w)) : averageLife(w)), 0) / Math.max(1, s.worlds.length));
+      return s.lifeN ? Math.round(s.lifeSum / s.lifeN) : relativeLife(s, "stewards");
   }
+}
+
+/**
+ * The land's life across the five worlds right now, each world against its own
+ * start (a spent one as it ended), in percent. Given a faction, a world it has
+ * never set foot on counts as nothing: you can only keep what you were there
+ * to keep, so a faction can't meet this goal by staying home.
+ */
+export function relativeLife(s: Pick<RoomState, "worlds">, by?: FactionId): number {
+  const one = (w: World): number =>
+    by && w.landed && !w.landed.includes(by) ? 0 : Math.min(100, (100 * (w.spent ? (w.lifeEnd ?? averageLife(w)) : averageLife(w))) / Math.max(1, w.lifeStart));
+  return Math.round(s.worlds.reduce((a, w) => a + one(w), 0) / Math.max(1, s.worlds.length));
 }
 
 export const reachedPar = (s: RoomState, f: FactionId): boolean => measure(s, f) >= FACTIONS[f].par;
@@ -1883,11 +1920,11 @@ export function measureText(s: RoomState, f: FactionId): string {
     case "foundry":
       return `took ${pct(m)} of everything taken. Par ${pct(par)}.`;
     case "automata":
-      return `supplied ${pct(m)} of all compute. Par ${pct(par)}.`;
+      return `supplied ${m} compute-ticks, ${pct(s.computeTotal ? m / s.computeTotal : 0)} of all compute. Par ${par}.`;
     case "brokers":
       return `carried ${m} units through its Pads. Par ${par}.`;
     case "stewards":
-      return `the land across five worlds averages ${m}% alive. Par ${par}%.`;
+      return `kept the land it stood on ${m}% as alive as it began, across five worlds over the campaign. Par ${par}%.`;
   }
 }
 

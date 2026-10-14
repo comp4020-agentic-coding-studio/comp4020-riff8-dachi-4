@@ -199,6 +199,8 @@ export interface LogEntry {
   /** repeated god acts fold into one line: same key, a count */
   key?: string;
   n?: number;
+  /** the earlier line this one replaces */
+  was?: number;
 }
 
 export type Phase =
@@ -283,8 +285,11 @@ export interface RoomState {
   nextShipId: number;
   /** stock launched and landed so far: what's in ships is always the difference */
   transit: { launched: Bundle; landed: Bundle };
-  /** compute-ticks supplied by every machine in the room, for the Automata's share */
+  /** compute-ticks supplied by every faction's machines in the room, for the Automata's share */
   computeTotal: number;
+  /** the Stewards' measure: the five worlds' land life (each against its own start), summed over economy ticks */
+  lifeSum: number;
+  lifeN: number;
   factions: Partial<Record<FactionId, FactionState>>;
   history: StageSummary[];
   archive: ArchiveEntry[];
@@ -358,7 +363,7 @@ export interface Delta {
   vw: number;
   /** strikes that landed in this delta on the viewed world: [x, y] */
   blasts?: [number, number][];
-  meta?: Pick<RoomState, "reserve" | "phase" | "hostId" | "god" | "ships" | "factions" | "computeTotal" | "transit"> & Partial<Pick<RoomState, "archive" | "history">>;
+  meta?: Pick<RoomState, "reserve" | "phase" | "hostId" | "god" | "ships" | "factions" | "computeTotal" | "transit" | "lifeSum" | "lifeN"> & Partial<Pick<RoomState, "archive" | "history">>;
   world?: WorldMeta;
   summaries?: WorldSummary[];
   log?: LogEntry[];

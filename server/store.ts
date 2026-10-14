@@ -6,7 +6,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { RoomState } from "../shared/protocol.ts";
+import type { RoomState, World } from "../shared/protocol.ts";
 import { SCHEMA_VERSION } from "../shared/protocol.ts";
 
 const dir = process.env.DATA_DIR ?? join(process.cwd(), "data");
@@ -62,11 +62,59 @@ export function loadRoom(code: string): RoomState | null {
     s.v = schema = 2;
   }
   if (schema === 2) {
-    // 2 -> 3: rooms from before gods have them switched off
-    s.god = { on: false, id: null, until: 0, ready: 0, made: 0 };
-    s.bombs = [];
-    s.auras = [];
+    // 2 -> 3: rooms from before gods have them switched off (and 3 -> 4 replaces them anyway)
     s.v = schema = 3;
+  }
+  if (schema === 3) {
+    // 3 -> 4: a room becomes a list of worlds. Every room saved before this is a
+    // classic room, with gods off; its one world is the stage it was on.
+    const o = s as unknown as Record<string, unknown> & { tiles: World["tiles"]; ledger: World["ledger"] };
+    const world: World = {
+      stage: o.stage as number,
+      w: o.w as number,
+      tiles: o.tiles,
+      buildings: o.buildings as World["buildings"],
+      nextBuildingId: o.nextBuildingId as number,
+      inventory: o.inventory as World["inventory"],
+      stock: {},
+      ledger: o.ledger,
+      econ: o.econ as World["econ"],
+      heat: o.heat as number,
+      econTicks: o.econTicks as number,
+      lifeStart: o.lifeStart as number,
+      startTick: o.stageStartTick as number,
+      spent: false,
+      sown: 0,
+      generated: Object.values(o.ledger).reduce((a, l) => a + l.initial, 0),
+      strikes: [],
+      blessings: [],
+      hushes: [],
+      hushUntil: {},
+      hushRest: {},
+      reserves: [],
+      reserveUntil: {},
+      reserveRest: {},
+      landed: [],
+      seeded: 0,
+      took: {},
+    };
+    for (const k of ["w", "tiles", "buildings", "nextBuildingId", "inventory", "ledger", "econ", "heat", "econTicks", "lifeStart", "stageStartTick", "bombs", "auras"]) delete o[k];
+    s.worlds = [world];
+    s.mode = "classic";
+    s.pick = "either";
+    s.god = { on: false, id: null, until: 0, next: 0, last: null, aim: 0, made: 0 };
+    s.ships = [];
+    s.nextShipId = 1;
+    s.transit = { launched: { matter: 0, mineral: 0, coolant: 0 }, landed: { matter: 0, mineral: 0, coolant: 0 } };
+    s.computeTotal = 0;
+    s.factions = {};
+    s.logId = 0;
+    s.log = s.log.map((l) => ({ ...l, id: ++s.logId }));
+    for (const p of Object.values(s.players)) {
+      p.world = 0;
+      p.god = { turns: 0, sown: 0, destroyed: 0, felled: 0, gifted: 0, blessed: 0, hushed: 0 };
+    }
+    s.v = schema = 4;
   }
   if (schema !== SCHEMA_VERSION) throw new Error(`room ${code} is schema ${row.schema}, server expects ${SCHEMA_VERSION}`);
   return s;

@@ -2,7 +2,7 @@
 // (mutated in place, read by the renderer every frame) and a version counter
 // the HUD polls at a few hertz, so React never sees per-entity updates.
 import { PROTOCOL_VERSION, type ClientMsg, type Command, type Delta, type LogEntry, type ServerMsg, type Snapshot } from "../shared/protocol.ts";
-import { BOMB_RADIUS, PLAYER_SPEED, TICK_MS } from "../shared/content.ts";
+import { STRIKE_RADIUS, PLAYER_SPEED, TICK_MS } from "../shared/content.ts";
 
 export type Status = "connecting" | "live" | "reconnecting" | "error";
 
@@ -127,13 +127,20 @@ export class GameClient {
       // the swing is a preview; the stockpile only moves when the server says so
       if (c.k === "harvest") this.swingUntil = performance.now() + 450;
     }
-    this.raw({ t: "cmd", id, inc: this.inc, gen: this.state.gen, c });
+    this.raw({ t: "cmd", id, inc: this.inc, gen: this.state.gen, c, w: this.state.viewing });
+  }
+
+  /** Look at another world: free, and never presence. The server answers with a fresh snapshot of it. */
+  view(world: number): void {
+    if (!this.state || world === this.state.viewing) return;
+    this.raw({ t: "view", world });
   }
 
   private receive(m: ServerMsg): void {
     switch (m.t) {
       case "welcome": {
         const fresh = this.inc !== m.inc || this.state?.gen !== m.snap.gen;
+        const moved = this.state?.viewing !== m.snap.viewing || (this.state && this.state.players[m.you]?.world !== m.snap.players[m.you]?.world);
         if (this.inc && this.inc !== m.inc && this.pending.size) this.toast("The server restarted; your last action may not have gone through.", "bad");
         this.inc = m.inc;
         this.you = m.you;
@@ -147,10 +154,11 @@ export class GameClient {
           this.samples.clear();
         }
         const me = m.snap.players[m.you];
-        if (me && (fresh || Math.hypot(me.x - this.me.x, me.y - this.me.y) > 1)) this.me = { x: me.x, y: me.y, dx: 0, dy: 0 };
+        if (me && (fresh || moved || Math.hypot(me.x - this.me.x, me.y - this.me.y) > 1)) this.me = { x: me.x, y: me.y, dx: 0, dy: 0 };
+        if (moved) this.samples.clear();
         for (const p of Object.values(m.snap.players)) this.sample(p.id, p.x, p.y);
         this.status = "live";
-        if (fresh) this.onBoundary?.();
+        if (fresh || moved) this.onBoundary?.();
         if (!this.pingTimer) this.pingTimer = setInterval(() => this.raw({ t: "ping", n: performance.now() }), 3000);
         this.bump();
         break;
@@ -178,7 +186,7 @@ export class GameClient {
   private apply(d: Delta): void {
     const s = this.state;
     if (!s) return;
-    if (d.gen !== s.gen || d.seq !== this.seq + 1) {
+    if (d.gen !== s.gen || d.seq !== this.seq + 1 || d.vw !== s.viewing) {
       // a gap (or a stage we haven't got): ask for a fresh snapshot rather than guess
       if (d.seq > this.seq) this.raw({ t: "sync" });
       return;
@@ -187,7 +195,13 @@ export class GameClient {
     s.seq = d.seq;
     s.tick = d.tick;
     for (const p of d.players) {
+      const was = s.players[p.id]?.world;
       s.players[p.id] = p;
+      // landing on another world: the camera goes with you
+      if (p.id === this.you && was !== undefined && was !== p.world) {
+        this.me = { x: p.x, y: p.y, dx: 0, dy: 0 };
+        if (p.world >= 0) this.view(p.world);
+      }
       this.sample(p.id, p.x, p.y);
       if (p.id === this.you) this.reconcile(p.x, p.y);
     }
@@ -201,8 +215,8 @@ export class GameClient {
     for (const [i, t] of d.tiles ?? []) {
       const before = s.tiles[i]?.amt ?? 0;
       s.tiles[i] = t;
-      // stock a bomb destroyed is not a harvest: no "+n" for it
-      const bombed = d.blasts?.some(([bx, by]) => Math.hypot((i % s.w) - bx, Math.floor(i / s.w) - by) <= BOMB_RADIUS);
+      // stock a strike destroyed is not a harvest: no "+n" for it
+      const bombed = d.blasts?.some(([bx, by]) => Math.hypot((i % s.w) - bx, Math.floor(i / s.w) - by) <= STRIKE_RADIUS);
       if (t.amt < before && !bombed) this.onTile?.(i, before, t.amt);
     }
     for (const [bx, by] of d.blasts ?? []) this.onBlast?.(bx, by);
@@ -213,8 +227,13 @@ export class GameClient {
     }
     if (d.removed) s.buildings = s.buildings.filter((b) => !d.removed!.includes(b.id));
     if (d.meta) Object.assign(s, d.meta);
+    if (d.world) Object.assign(s, d.world);
+    if (d.summaries) s.summaries = d.summaries;
     if (d.log) {
-      s.log = [...s.log, ...d.log].slice(-40) as LogEntry[];
+      // a folded line ("called Lightning 14 times") comes again under the same id: replace it
+      const byId = new Map(s.log.map((l) => [l.id, l]));
+      for (const l of d.log) byId.set(l.id, l);
+      s.log = [...byId.values()].sort((a, b) => a.id - b.id).slice(-40) as LogEntry[];
     }
     this.bump();
   }
@@ -246,6 +265,7 @@ export class GameClient {
   predict(dt: number): void {
     const s = this.state;
     if (!s || s.phase.k === "ended") return;
+    if (s.players[this.you]?.world !== s.viewing) return;
     const w = s.w - 1;
     this.me.x = Math.max(0, Math.min(w, this.me.x + this.me.dx * PLAYER_SPEED * dt));
     this.me.y = Math.max(0, Math.min(w, this.me.y + this.me.dy * PLAYER_SPEED * dt));

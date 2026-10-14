@@ -3,18 +3,23 @@
 // harvests by hand, and builds each stage's machine (homes, power, compute,
 // extractors) wherever the server will accept them. Used to drive a room
 // through every stage while real browsers watch, and to measure pacing.
+// Given a faction in a cosmos room, it joins that faction and plays it with
+// the same pure planner the server's own bots use (shared/bots.ts).
 //
-//   node scripts/playbot.ts <room> [baseUrl] [name]
+//   node scripts/playbot.ts <room> [baseUrl] [name] [faction]
 import WebSocket from "ws";
-import { BUILDINGS, HARVEST_RANGE, STAGES, type BuildingType } from "../shared/content.ts";
-import { PROTOCOL_VERSION, type RoomState, type ServerMsg, type Snapshot } from "../shared/protocol.ts";
+import { BUILDINGS, FACTION_IDS, HARVEST_RANGE, STAGES, type BuildingType, type FactionId } from "../shared/content.ts";
+import { PROTOCOL_VERSION, type RoomState, type ServerMsg, type Snapshot, type World } from "../shared/protocol.ts";
 import { placementProblem } from "../shared/sim.ts";
+import { planBot, planGod } from "../shared/bots.ts";
+import { rng } from "../shared/worldgen.ts";
 
-const [room, base = "http://localhost:8347", name = "Bot"] = process.argv.slice(2);
-if (!room) {
-  console.error("usage: node scripts/playbot.ts <room> [baseUrl] [name]");
+const [room, base = "http://localhost:8347", name = "Bot", factionArg] = process.argv.slice(2);
+if (!room || (factionArg && !(FACTION_IDS as readonly string[]).includes(factionArg))) {
+  console.error(`usage: node scripts/playbot.ts <room> [baseUrl] [name] [${FACTION_IDS.join("|")}]`);
   process.exit(1);
 }
+const faction = factionArg as FactionId | undefined;
 
 const PLANS: Record<string, BuildingType[]> = {
   earth: ["city", "furnace", "datacentre", "extractor", "extractor", "plaza", "solar", "extractor", "extractor", "city", "extractor", "extractor"],
@@ -33,8 +38,21 @@ let goal: [number, number] | null = null;
 const started = Date.now();
 
 const send = (c: object): void => {
-  if (s) ws.send(JSON.stringify({ t: "cmd", id: `${name}-${n++}`, inc, gen: s.gen, c }));
+  if (s) ws.send(JSON.stringify({ t: "cmd", id: `${name}-${n++}`, inc, gen: s.gen, c, w: s.viewing }));
 };
+const W = (snap: Snapshot): World => snap as unknown as World;
+
+/** The room as the planner sees it: the world we stand on in full, the others from their summaries. */
+function asRoom(snap: Snapshot): RoomState {
+  const ledger = (left: number, total: number) => {
+    const e = { initial: total, remaining: left, extracted: total - left, destroyed: 0 };
+    return { matter: e, mineral: { ...e, initial: 0, remaining: 0, extracted: 0 }, coolant: { ...e, initial: 0, remaining: 0, extracted: 0 } };
+  };
+  const worlds = snap.summaries.map((w, i) =>
+    i === snap.viewing ? W(snap) : ({ stage: w.stage, spent: w.spent, lifeEnd: w.life, ledger: ledger(w.left, w.total), tiles: [], buildings: [], stock: {}, landed: [] } as unknown as World),
+  );
+  return { ...snap, worlds, tokens: {}, receipts: {} } as unknown as RoomState;
+}
 
 ws.on("open", () => ws.send(JSON.stringify({ t: "hello", v: PROTOCOL_VERSION, room, name })));
 ws.on("message", (raw) => {
@@ -46,7 +64,14 @@ ws.on("message", (raw) => {
     inc = m.inc;
     goal = null;
     if (fresh) console.log(`${((Date.now() - started) / 1000).toFixed(0)}s: ${STAGES[s.stage].name}${s.phase.k === "ended" ? " (ended)" : ""}`);
+    if (faction && s.mode === "cosmos" && s.players[you] && !s.players[you].faction) send({ k: "faction", f: faction });
+    // always look at the world we stand on
+    const mine = s.players[you]?.world ?? 0;
+    if (mine >= 0 && mine !== s.viewing) ws.send(JSON.stringify({ t: "view", world: mine }));
+  } else if (m.t === "ack" && !m.ok && faction) {
+    if (Math.random() < 0.1) console.log(`refused: ${m.reason}`);
   } else if (m.t === "delta" && s) {
+    if (m.vw !== s.viewing) return;
     for (const p of m.players) s.players[p.id] = p;
     for (const [id, x, y] of m.moves ?? []) if (s.players[id]) Object.assign(s.players[id], { x, y });
     for (const [i, t] of m.tiles ?? []) s.tiles[i] = t;
@@ -57,6 +82,10 @@ ws.on("message", (raw) => {
     }
     if (m.removed) s.buildings = s.buildings.filter((b) => !m.removed!.includes(b.id));
     if (m.meta) Object.assign(s, m.meta);
+    if (m.world) Object.assign(s, m.world);
+    if (m.summaries) s.summaries = m.summaries;
+    const mine = s.players[you]?.world ?? 0;
+    if (mine >= 0 && mine !== s.viewing) ws.send(JSON.stringify({ t: "view", world: mine }));
   }
 });
 ws.on("close", () => process.exit(0));
@@ -68,7 +97,7 @@ function spotFor(type: BuildingType, me: { x: number; y: number }): [number, num
   let score = -Infinity;
   for (let y = 0; y < s.w; y++)
     for (let x = 0; x < s.w; x++) {
-      if (placementProblem(st, type, x, y) !== null) continue;
+      if (placementProblem(st, W(s), type, x, y) !== null) continue;
       const d = Math.hypot(x - me.x, y - me.y);
       let v = -d;
       if (type === "extractor") {
@@ -97,8 +126,23 @@ function spotFor(type: BuildingType, me: { x: number; y: number }): [number, num
   return best;
 }
 
+// a faction bot: the shared planner decides, a few commands a second, like a person
+if (faction)
+  setInterval(() => {
+    if (!s || s.phase.k !== "play" || s.mode !== "cosmos") return;
+    const me = s.players[you];
+    if (!me || me.world < 0 || me.world !== s.viewing) return;
+    const r = rng(Date.now() & 0xffffffff);
+    const room = asRoom(s);
+    if (s.god.id === you) {
+      const g = planGod(room, you, r);
+      if (g) send(g);
+    }
+    for (const c of planBot(room, you, r)) send(c);
+  }, 400);
+
 setInterval(() => {
-  if (!s || s.phase.k !== "play") return;
+  if (faction || !s || s.phase.k !== "play") return;
   const me = s.players[you];
   if (!me) return;
   const st = STAGES[s.stage];

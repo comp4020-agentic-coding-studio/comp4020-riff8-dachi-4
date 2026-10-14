@@ -121,3 +121,36 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
 .loading h1 { font-size: 1.2rem; font-weight: 500; }
 .bottleneck { margin-top: 0.3rem; border-top: 1px solid rgba(0, 0, 0, 0.12); padding-top: 0.25rem; }
 .ending .card.dawn { background: rgba(255, 248, 232, 0.95); max-height: 90vh; overflow: auto; }
+
+/* cosmos and gods */
+.host .mode { border: none; padding: 0; margin: 0.3rem 0; }
+.host .mode legend { font-weight: 700; padding: 0; }
+.host select { font: inherit; }
+.host-switch .switch { font-weight: 700; }
+.badge { font-size: 0.95em; margin-right: 0.25rem; text-shadow: 0 0 1px #2b2533, 0 0 1px #2b2533; }
+.chips { display: flex; flex-wrap: wrap; gap: 0.25rem; padding: 0.35rem; }
+.chip { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; padding: 0.15rem 0.35rem; }
+.chip.on { background: #ffe9a8; border-color: var(--ink); }
+.chip.spent { opacity: 0.7; filter: grayscale(1); }
+.chip .ring { width: 1.05rem; height: 1.05rem; border-radius: 50%; display: grid; place-items: center; }
+.chip .ring span { width: 0.65rem; height: 0.65rem; border-radius: 50%; border: 1px solid var(--line); }
+.chip .warn { color: var(--bad); font-weight: 800; }
+.chip .you { font-size: 0.6rem; }
+.godline { position: absolute; top: 0.6rem; left: 50%; transform: translateX(-50%); width: min(22rem, calc(100vw - 42rem)); min-width: 12rem; text-align: center;
+  background: rgba(255, 250, 240, 0.92); border: 2px solid #c79a1e; border-radius: 12px; padding: 0.25rem 0.6rem; font-size: 0.85rem; box-shadow: 0 3px 0 #c79a1e; }
+.godline p { margin: 0.1rem 0; }
+.godline .drain { display: block; height: 0.35rem; background: rgba(0, 0, 0, 0.12); border-radius: 99px; overflow: hidden; }
+.godline .drain span { display: block; height: 100%; background: #c79a1e; }
+.toasts { top: 5.2rem; }
+.factions-panel { top: auto; right: 0.6rem; bottom: 0.6rem; max-width: min(17rem, 44vw); font-size: 0.78rem; }
+.factions-panel li { margin: 0.15rem 0; }
+.powers-bar { border-color: #c79a1e; box-shadow: 0 3px 0 #c79a1e; }
+.powers-bar .aim { align-self: center; }
+.powers-bar .sow-pick { display: flex; gap: 0.2rem; align-items: center; }
+.powers-bar .preview { flex-basis: 100%; margin: 0.15rem 0 0; text-align: center; }
+.factions .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; margin: 0.6rem 0; }
+.fcard { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 0.15rem; border-width: 3px; }
+.fcard .fname { font-weight: 800; font-size: 1.05rem; }
+.launch label, .inspect label { display: flex; justify-content: space-between; margin: 0.15rem 0; }
+.launch input[type="number"], .inspect input[type="number"] { width: 4.5rem; }
+.flight { position: absolute; top: 40%; left: 50%; transform: translateX(-50%); background: var(--paper); border: 2px solid var(--line); border-radius: 12px; padding: 0.5rem 0.8rem; }

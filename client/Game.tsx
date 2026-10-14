@@ -3,11 +3,50 @@
 // compact React HUD that re-renders at most five times a second from the
 // client's version counter, never per entity update.
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BUILDINGS, EMOTES, FAMILIES, HARVEST_COOLDOWN_TICKS, HARVEST_RANGE, STAGES, TICK_MS, TOOL_TIERS, buildingName, harvestCooldown, toolCost, toolName, type BuildingType, type Emote, type Family, type GodPower } from "../shared/content.ts";
-import type { Building, Player, Snapshot } from "../shared/protocol.ts";
-import { averageLife, craftProblem, harvestTicks } from "../shared/sim.ts";
+import {
+  BUILDINGS,
+  EMOTES,
+  FACTIONS,
+  FACTION_IDS,
+  FAMILIES,
+  GOD_GAP_TICKS,
+  GOD_POWERS,
+  GOD_TURN_TICKS,
+  HARVEST_COOLDOWN_TICKS,
+  HARVEST_RANGE,
+  RESERVE_COST,
+  SHIP_CARGO,
+  STAGES,
+  TICK_MS,
+  TOOL_TIERS,
+  buildingName,
+  harvestCooldown,
+  powerName,
+  toolCost,
+  toolName,
+  type BuildingType,
+  type Emote,
+  type FactionId,
+  type Family,
+  type GodPower,
+  type Shape,
+} from "../shared/content.ts";
+import type { Building, Player, Snapshot, World } from "../shared/protocol.ts";
+import { averageLife, buildable, costOf, craftProblem, factionProblem, harvestTicks, launchPlan, measureText, reachedPar } from "../shared/sim.ts";
 import { GameClient } from "./net.ts";
-import { PLAYER_COLOURS, Renderer, type Tool, type View } from "./render.ts";
+import { PLAYER_COLOURS, Renderer, godPreview, type Tool, type View } from "./render.ts";
+
+/** The viewed world, as the per-world rules see it. */
+const W = (s: Snapshot): World => s as unknown as World;
+const SHAPE_GLYPH: Record<Shape, string> = { square: "■", circle: "●", triangle: "▲", diamond: "◆" };
+/** A faction's badge: its shape and its colour, and the shape alone carries it. */
+function Badge({ f }: { f: FactionId }): ReactNode {
+  return (
+    <span className="badge" style={{ color: FACTIONS[f].colour }} aria-label={FACTIONS[f].name} title={FACTIONS[f].name}>
+      {SHAPE_GLYPH[FACTIONS[f].shape]}
+    </span>
+  );
+}
 import { Sound, type Mix } from "./audio.ts";
 
 const EMOTE_GLYPH: Record<Emote, string> = { wave: "👋", heart: "💛", laugh: "😄", wow: "😮", sad: "😢", point: "👉" };
@@ -49,12 +88,18 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   const [client, setClient] = useState<GameClient | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const soundRef = useRef(new Sound());
-  const viewRef = useRef<View>({ tool: "harvest", build: null, god: null, hover: null, keyboardTarget: true, survey: false, selected: null, reducedMotion: prefersReducedMotion(), low: false, zoom: 1 });
+  const viewRef = useRef<View>({ tool: "harvest", build: null, god: null, hover: null, keyboardTarget: true, survey: false, selected: null, reducedMotion: prefersReducedMotion(), low: false, zoom: 1, map: false });
   const [, force] = useState(0);
   const [help, setHelp] = useState(false);
   const [naming, setNaming] = useState<[number, number] | null>(null);
   const [mix, setMix] = useState<Mix>({ music: 0.5, ambience: 0.7, effects: 0.8 });
   const [settings, setSettings] = useState(false);
+  const [bar, setBar] = useState<"build" | "powers">("build");
+  const barRef = useRef(bar);
+  barRef.current = bar;
+  const [sowing, setSowing] = useState(false);
+  const [launching, setLaunching] = useState<Building | null>(null);
+  const [trading, setTrading] = useState(false);
   useVersion(client);
   const view = viewRef.current;
   const rerender = (): void => force((n) => n + 1);
@@ -69,15 +114,20 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       if (!ok) snd.reject();
       else if (cmd.k === "harvest") snd.harvest();
       else if (cmd.k === "build") snd.build();
+      else if (cmd.k === "launch") snd.launch();
+      else if (cmd.k === "god" && cmd.power === "bless") snd.shimmer();
     };
     const prevBoundary = c.onBoundary;
     c.onBoundary = () => {
       prevBoundary?.();
-      soundRef.current.boundary();
-      viewRef.current.tool = "harvest";
       viewRef.current.build = null;
-      viewRef.current.god = null;
       viewRef.current.selected = null;
+      // a god aiming at another world keeps the power in hand
+      if (viewRef.current.tool !== "god") {
+        soundRef.current.boundary();
+        viewRef.current.tool = "harvest";
+        viewRef.current.god = null;
+      }
     };
     const drawBlast = c.onBlast;
     c.onBlast = (x, y) => {
@@ -96,10 +146,17 @@ export default function Game({ room, name }: { room: string; name: string }): Re
 
   // keep the sound engine fed with the world's state
   const s = client?.state ?? null;
+  const godRef = useRef<string | null>(null);
+  const worldRef = useRef<number>(-2);
   useEffect(() => {
-    if (!s) return;
+    if (!s || !client) return;
     const snd = soundRef.current;
-    snd.life = averageLife(s);
+    if (s.god.id && s.god.id !== godRef.current) snd.ascend();
+    godRef.current = s.god.id;
+    const mine = s.players[client.you]?.world ?? 0;
+    if (worldRef.current === -1 && mine >= 0) snd.landing();
+    worldRef.current = mine;
+    snd.life = averageLife(W(s));
     snd.machines = s.buildings.filter((b) => b.status === "ok" && b.owner).length;
     snd.stage = s.stage;
     snd.ended = s.phase.k === "ended" && s.phase.how !== "restraint";
@@ -117,7 +174,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       const st = client.state;
       const me = st?.players[client.you];
       // an aura counts from where you're standing now, as the server will see it
-      const ticks = family && st && me ? harvestTicks(st, { ...me, x: client.me.x, y: client.me.y }, family) : HARVEST_COOLDOWN_TICKS;
+      const ticks = family && st && me ? harvestTicks(st, W(st), { ...me, x: client.me.x, y: client.me.y }, family) : HARVEST_COOLDOWN_TICKS;
       harvestTimer = setTimeout(holdHarvest, ticks * TICK_MS + 20);
     };
     const sendMove = (): void => {
@@ -155,15 +212,51 @@ export default function Game({ room, name }: { room: string; name: string }): Re
         sendMove();
         return;
       }
+      const cs = client.state;
+      const isGod = !!(cs && cs.god.on && cs.god.id === client.you);
+      if (k === "enter" && viewRef.current.tool === "god") {
+        // a power stays in hand: hold Enter to use it again and again
+        e.preventDefault();
+        viewRef.current.keyboardTarget = true;
+        const tgt = rendererRef.current?.facingTile() ?? viewRef.current.hover;
+        if (tgt) act(tgt[0], tgt[1]);
+        return;
+      }
       if (e.repeat) return;
+      if (k === "m" && cs?.mode === "cosmos") {
+        viewRef.current.map = !viewRef.current.map;
+        rerender();
+        return;
+      }
+      if (isGod && cs && (k === "[" || k === "]") && cs.mode === "cosmos") {
+        // the god's world selector: aim, and look where you aim
+        const n = cs.summaries.length;
+        const next = (cs.viewing + (k === "]" ? 1 : n - 1)) % n;
+        client.view(next);
+        client.send({ k: "aim", world: next });
+        return;
+      }
+      if (k === "tab" && isGod) {
+        e.preventDefault();
+        setBar((b) => (b === "powers" ? "build" : "powers"));
+        return;
+      }
+      if (isGod && barRef.current === "powers" && /^[1-5]$/.test(k)) {
+        e.preventDefault();
+        const power = GOD_POWERS[Number(k) - 1];
+        if (power === "sow") setSowing(true);
+        else chooseGod(power);
+        return;
+      }
       if (k === "e" || k === " ") {
         e.preventDefault();
         if (!harvestTimer) holdHarvest();
       } else if (e.shiftKey && /^digit[1-6]$/i.test(e.code)) {
         e.preventDefault();
         client.send({ k: "emote", e: EMOTES[Number(e.code.slice(5)) - 1] });
-      } else if (/^[1-9]$/.test(k) && st) {
-        const type = st.buildings[Number(k) - 1];
+      } else if (/^[1-9]$/.test(k) && st && client.state) {
+        const me = client.state.players[client.you];
+        const type = buildable(client.state, W(client.state), me?.faction)[Number(k) - 1];
         if (type) {
           e.preventDefault();
           chooseBuild(type);
@@ -171,6 +264,11 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       } else if (k === "escape") {
         setTool("harvest");
         setHelp(false);
+        setSowing(false);
+        if (viewRef.current.map) {
+          viewRef.current.map = false;
+          rerender();
+        }
       } else if (k === "enter") {
         e.preventDefault();
         viewRef.current.keyboardTarget = true;
@@ -227,6 +325,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
     view.god = { power, family };
     view.build = null;
     view.selected = null;
+    setSowing(false);
     rerender();
   }
 
@@ -279,7 +378,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
         if (view.build) c.send({ k: "build", x, y, type: view.build });
         break;
       case "god":
-        if (view.god) c.send({ k: "god", power: view.god.power, x, y, family: view.god.family });
+        if (view.god) c.send({ k: "god", power: view.god.power, x, y, family: view.god.family, world: st.viewing });
         break;
       case "demolish":
         if (t.b) c.send({ k: "demolish", x, y });
@@ -294,7 +393,9 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       default:
         if ((t.d && t.amt > 0) || t.b) {
           const site = t.b ? st.buildings.find((b) => b.id === t.b) : undefined;
-          if (site && site.work >= BUILDINGS[site.type].build * 10) {
+          if (site && site.type === "pad" && site.work >= BUILDINGS.pad.build * 10 && st.players[c.you]?.world === st.viewing) {
+            setLaunching(site);
+          } else if (site && site.work >= BUILDINGS[site.type].build * 10) {
             view.selected = site.id;
             rerender();
           } else {
@@ -323,6 +424,18 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   };
   const onClick = (e: React.PointerEvent<HTMLCanvasElement>): void => {
     if (e.button !== 0) return;
+    if (view.map && client) {
+      // clicking a disc views that world; it never costs a turn or a resource
+      const rect = e.currentTarget.getBoundingClientRect();
+      const i = rendererRef.current?.discAt(e.clientX - rect.left, e.clientY - rect.top);
+      if (i !== null && i !== undefined) {
+        client.view(i);
+        if (client.state?.god.id === client.you) client.send({ k: "aim", world: i });
+        view.map = false;
+        rerender();
+      }
+      return;
+    }
     onPointer(e);
     // a tall building is picked by what you see of it, not only its footprint
     if (view.tool === "harvest" || view.tool === "inspect" || view.tool === "demolish") {
@@ -336,11 +449,20 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   const st = s ? STAGES[s.stage] : null;
   const host = !!(s && client && s.hostId === client.you);
   const me = s && client ? s.players[client.you] : undefined;
-  // a god's turn ends on the server's clock: put the power down when it does
-  if (view.tool === "god" && s && client && s.god.id !== client.you) {
+  // a god's turn ends on the server's clock: put the power down when it does, and switch the bar back
+  const isGod = !!(s && client && s.god.on && s.god.id === client.you);
+  if (view.tool === "god" && !isGod) {
     view.tool = "harvest";
     view.god = null;
   }
+  const wasGod = useRef(false);
+  useEffect(() => {
+    if (isGod && !wasGod.current) setBar("powers");
+    if (!isGod && wasGod.current) setBar("build");
+    wasGod.current = isGod;
+  }, [isGod]);
+  const onWorld = !!(me && s && me.world === s.viewing);
+  const needCards = !!(s && me && s.mode === "cosmos" && !me.faction && s.phase.k === "play");
 
   return (
     <main className="game">
@@ -369,19 +491,29 @@ export default function Game({ room, name }: { room: string; name: string }): Re
       ) : (
         <>
           <div className="col-left">
-            <StagePanel s={s} />
-            {(s.god.on || host) && s.phase.k === "play" && (
-              <Gods s={s} you={client.you} host={host} view={view} onPower={chooseGod} onSwitch={(on) => client.send({ k: "gods", on })} />
-            )}
+            {host && s.phase.k === "play" && <HostSwitch s={s} onSwitch={(on) => client.send({ k: "gods", on })} />}
+            {s.mode === "cosmos" && <WorldChips s={s} me={me} onView={(i) => client.view(i)} onMap={() => { view.map = !view.map; rerender(); }} />}
+            <StagePanel s={s} me={me} />
             {me && <Pack s={s} me={me} onCraft={(tool) => client.send({ k: "craft", tool })} onDeposit={() => client.send({ k: "deposit" })} />}
-            <Economy s={s} />
-            {st.id === "earth" && s.phase.k === "play" && <Memo s={s} />}
-          {st.id === "universe" && s.phase.k === "play" && <LastFrontier s={s} you={client.you} onVote={(on) => client.send({ k: "stop", on })} />}
+            <Economy s={s} me={me} onTrade={() => setTrading(true)} />
+            {s.mode === "classic" && st.id === "earth" && s.phase.k === "play" && <Memo s={s} />}
+            {st.id === "universe" && s.phase.k === "play" && (s.mode === "classic" || s.summaries.slice(0, -1).every((w) => w.spent)) && (
+              <LastFrontier s={s} you={client.you} onVote={(on) => client.send({ k: "stop", on })} />
+            )}
           </div>
+          {s.god.on && s.phase.k === "play" && <GodLine s={s} you={client.you} />}
           <RoomPanel s={s} client={client} host={host} />
-          <BuildBar s={s} me={me} view={view} onPick={chooseBuild} onTool={setTool} />
+          {s.mode === "cosmos" && <FactionPanel s={s} />}
+          {isGod && bar === "powers" ? (
+            <PowersBar s={s} view={view} sowing={sowing} onSow={() => setSowing((v) => !v)} onPower={chooseGod} onFlip={() => setBar("build")} />
+          ) : (
+            <BuildBar s={s} me={me} view={view} onWorld={onWorld} onPick={chooseBuild} onTool={setTool} god={isGod} onFlip={() => setBar("powers")} />
+          )}
+          {needCards && me && <FactionCards s={s} me={me} onPick={(f) => client.send({ k: "faction", f })} />}
+          {launching && me && <LaunchPanel s={s} me={me} pad={launching} onLaunch={(c) => { client.send(c); setLaunching(null); }} onClose={() => setLaunching(null)} />}
+          {trading && me?.faction && <TradePanel s={s} me={me} onGive={(to, cargo) => { client.send({ k: "transfer", to, cargo }); setTrading(false); }} onClose={() => setTrading(false)} />}
           <Log s={s} client={client} />
-          {view.selected !== null && <Inspect s={s} b={s.buildings.find((b) => b.id === view.selected)} youId={client.you} host={host} onDemolish={(b) => client.send({ k: "demolish", x: b.x, y: b.y })} onClose={() => setTool("harvest")} />}
+          {view.selected !== null && <Inspect s={s} b={s.buildings.find((b) => b.id === view.selected)} youId={client.you} host={host} onDemolish={(b) => client.send({ k: "demolish", x: b.x, y: b.y })} onReserve={me?.faction === "stewards" && onWorld ? (x, y) => client.send({ k: "reserve", x, y }) : undefined} onClose={() => setTool("harvest")} />}
           <div className="corner-buttons">
             <div className="emotes" role="group" aria-label="Emotes">
               {EMOTES.map((e, i) => (
@@ -418,7 +550,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
               </p>
             </div>
           )}
-          {help && <Help onClose={() => setHelp(false)} st={st} />}
+          {help && <Help onClose={() => setHelp(false)} st={st} cosmos={s.mode === "cosmos"} />}
           {naming && (
             <NameDialog
               onCancel={() => setNaming(null)}
@@ -431,6 +563,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
           )}
           {s.phase.k === "transition" && <Transition s={s} />}
           {s.phase.k === "ended" && <Ending s={s} />}
+          {s.mode === "cosmos" && me && me.world < 0 && <InFlight s={s} me={me} />}
           <Toasts client={client} />
           {client.status === "reconnecting" && (
             <div className="overlay center" role="status">
@@ -446,13 +579,15 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   );
 }
 
-function StagePanel({ s }: { s: Snapshot }): ReactNode {
+function StagePanel({ s, me }: { s: Snapshot; me: Player | undefined }): ReactNode {
   const st = STAGES[s.stage];
-  const life = averageLife(s);
+  const life = averageLife(W(s));
+  const where = s.mode === "cosmos" ? (me && me.world === s.viewing ? "You're here" : me && me.world < 0 ? "Looking, from a ship" : "Only looking: you can't build or harvest here") : `Stage ${s.stage + 1} of 5`;
   return (
       <div className="panel top-left">
         <p className="stage">
-          <span className="stage-n">Stage {s.stage + 1} of 5</span> <strong>{st.name}</strong>
+          <span className="stage-n">{where}</span> <strong>{st.name}</strong>
+          {s.spent ? " · spent" : ""}
         </p>
         <p className="small">{st.tagline}</p>
         <ul className="stocks" aria-label="Natural stock remaining">
@@ -479,9 +614,9 @@ function StagePanel({ s }: { s: Snapshot }): ReactNode {
               {" "}· Heat: <strong>{s.heat}</strong>/100{s.heat >= 70 ? " (throttling)" : ""}
             </>
           )}
-          {st.energySource === "bottled" && (
+          {(st.energySource === "bottled" || s.mode === "cosmos") && (
             <>
-              {" "}· Bottled Sun: <strong>{s.reserve}</strong> energy left
+              {" "}· Bottled Sun: <strong>{s.reserve}</strong> energy
             </>
           )}
         </p>
@@ -492,6 +627,8 @@ function StagePanel({ s }: { s: Snapshot }): ReactNode {
 function RoomPanel({ s, client, host }: { s: Snapshot; client: GameClient; host: boolean }): ReactNode {
   const [copied, setCopied] = useState(false);
   const status = { live: "connected", connecting: "connecting…", reconnecting: "reconnecting…", error: "disconnected" }[client.status];
+  // bots only while they hold a seat; people whether here or away
+  const people = Object.values(s.players).filter((p) => !p.bot || p.connected);
   return (
       <div className="panel top-right">
         <p>
@@ -510,17 +647,24 @@ function RoomPanel({ s, client, host }: { s: Snapshot; client: GameClient; host:
         <p className="small" role="status">
           <span className={`dot ${client.status}`} aria-hidden="true" /> {status}
           {s.pace === "rapid" ? " · rapid preset" : ""}
+          {s.mode === "cosmos" ? " · cosmos" : ""}
         </p>
         <ul className="roster" aria-label="Players">
-          {Object.values(s.players)
-            .sort((a, b) => Number(b.connected) - Number(a.connected))
+          {people
+            .sort((a, b) => Number(b.connected) - Number(a.connected) || Number(!!a.bot) - Number(!!b.bot))
             .map((p) => (
               <li key={p.id} className={p.connected ? "" : "away"}>
-                <span className="swatch" style={{ background: PLAYER_COLOURS[p.colour % 8] }} aria-hidden="true" />
+                {p.faction ? <Badge f={p.faction} /> : <span className="swatch" style={{ background: PLAYER_COLOURS[p.colour % 8] }} aria-hidden="true" />}
                 {p.name}
+                {p.bot ? " (bot)" : ""}
                 {p.id === client.you ? " (you)" : ""}
                 {s.hostId === p.id ? " · host" : ""}
+                {s.god.id === p.id ? " · god" : ""}
                 {p.connected ? "" : " · away"}
+                {s.mode === "cosmos" && p.connected ? ` · ${p.world < 0 ? "in flight" : STAGES[s.summaries[p.world]?.stage ?? 0].name}` : ""}
+                {p.god.turns > 0 && (p.god.sown || p.god.destroyed) ? (
+                  <span className="small"> · sown {p.god.sown}, destroyed {p.god.destroyed}</span>
+                ) : null}
               </li>
             ))}
         </ul>
@@ -529,47 +673,200 @@ function RoomPanel({ s, client, host }: { s: Snapshot; client: GameClient; host:
   );
 }
 
-/** Who is a god and for how long; the god's powers; and the host's switch. */
-function Gods({ s, you, host, view, onPower, onSwitch }: { s: Snapshot; you: string; host: boolean; view: View; onPower: (p: GodPower, f?: Family) => void; onSwitch: (on: boolean) => void }): ReactNode {
-  const st = STAGES[s.stage];
-  const god = s.god.id ? s.players[s.god.id] : undefined;
-  const mine = s.god.on && s.god.id === you;
-  const secs = Math.max(0, Math.ceil(((s.god.until - s.tick) * TICK_MS) / 1000));
-  const on = (power: GodPower, family?: Family): boolean => view.tool === "god" && view.god?.power === power && view.god.family === family;
-  const power = (label: string, title: string, p: GodPower, f?: Family): ReactNode => (
-    <button key={label} type="button" className={on(p, f) ? "on" : ""} aria-pressed={on(p, f)} title={title} onClick={() => onPower(p, f)}>
-      {label}
-    </button>
-  );
+/** The host's switch: first in the left column, in both modes. */
+function HostSwitch({ s, onSwitch }: { s: Snapshot; onSwitch: (on: boolean) => void }): ReactNode {
   return (
-    <div className={`panel left gods ${mine ? "mine" : ""}`}>
-      <h2>Gods</h2>
-      {!s.god.on ? (
-        <p className="small">Gods are off in this world.</p>
-      ) : (
-        <p role="status">
-          {mine ? <strong>You are a god</strong> : god ? <><strong>{god.name}</strong> is a god</> : "Choosing a god…"}
-          {god ? ` for ${secs}s more.` : ""}
-        </p>
-      )}
-      {mine && (
-        <>
-          <p className="small">Pick a power, then click where it should land. Esc puts it down.</p>
-          <div className="row powers">
-            {power(st.names.datacentre ?? "Datacentre", "Raise a finished datacentre for nothing, anywhere it fits", "datacentre")}
-            {power("Bomb", "Goes off after 3 seconds: destroys the stock and the buildings around it", "bomb")}
-            {power("Aura", "For 5 seconds, everyone else standing in it harvests twice as fast", "aura")}
-            {FAMILIES.map((f) => power(`Plant ${st.families[f].label}`, `A new deposit of ${st.families[f].perTile} ${st.families[f].label}`, "plant", f))}
-          </div>
-        </>
-      )}
-      {host && (
-        <button type="button" onClick={() => onSwitch(!s.god.on)}>
-          {s.god.on ? "Turn gods off (host)" : "Turn gods on (host)"}
-        </button>
-      )}
+    <div className="panel host-switch">
+      <label className="switch">
+        <input type="checkbox" role="switch" checked={s.god.on} onChange={(e) => onSwitch(e.target.checked)} /> God mode {s.god.on ? "on" : "off"}
+      </label>
     </div>
   );
+}
+
+/** Five world chips, each with its stock ring: the cosmos one glance away. */
+function WorldChips({ s, me, onView, onMap }: { s: Snapshot; me: Player | undefined; onView: (i: number) => void; onMap: () => void }): ReactNode {
+  return (
+    <div className="panel chips" role="group" aria-label="Worlds">
+      {s.summaries.map((w, i) => {
+        const st = STAGES[w.stage];
+        const left = w.total ? w.left / w.total : 0;
+        const here = me?.world === i;
+        return (
+          <button
+            key={i}
+            type="button"
+            className={`chip ${i === s.viewing ? "on" : ""} ${w.spent ? "spent" : ""}`}
+            aria-pressed={i === s.viewing}
+            aria-label={`${st.name}: ${Math.round(left * 100)}% stock left${w.spent ? ", spent" : ""}${here ? ", you're here" : ""}${w.strikes.length ? `, ${w.strikes.length} strike${w.strikes.length === 1 ? "" : "s"} coming` : ""}`}
+            title={st.name}
+            onClick={() => onView(i)}
+          >
+            <span className="ring" style={{ background: `conic-gradient(#3a2c2c ${left * 360}deg, rgba(0,0,0,0.12) 0)` }} aria-hidden="true">
+              <span style={{ background: w.spent ? "#77757d" : `rgb(${st.palette.lush.join(",")})` }} />
+            </span>
+            <span className="cname">{st.name.replace("The ", "")}</span>
+            {here && <span className="you" aria-hidden="true">●</span>}
+            {w.strikes.length > 0 && <span className="warn" aria-hidden="true">!</span>}
+          </button>
+        );
+      })}
+      <button type="button" className="chip map" onClick={onMap}>
+        Map (M)
+      </button>
+    </div>
+  );
+}
+
+/** One compact line at the top centre: who the god is and how long, or how long until the next. */
+function GodLine({ s, you }: { s: Snapshot; you: string }): ReactNode {
+  const god = s.god.id ? s.players[s.god.id] : undefined;
+  const turnLeft = Math.max(0, s.god.until - s.tick);
+  const gapLeft = Math.max(0, s.god.next - s.tick);
+  const secs = (t: number): number => Math.ceil((t * TICK_MS) / 1000);
+  const aimed = god && s.mode === "cosmos" && s.god.aim !== s.viewing ? s.summaries[s.god.aim] : undefined;
+  const pending = s.mode === "cosmos" ? s.summaries.map((w, i) => ({ w, i })).filter(({ w, i }) => i !== s.viewing && w.strikes.length) : [];
+  return (
+    <div className="godline" role="status" aria-live="polite">
+      {god ? (
+        <>
+          <p>
+            <strong>{god.id === you ? "You are" : `${god.name}${god.bot ? " (bot)" : ""} is`}</strong> a god · {secs(turnLeft)}s
+          </p>
+          <span className="drain" aria-hidden="true">
+            <span style={{ width: `${(turnLeft / GOD_TURN_TICKS) * 100}%` }} />
+          </span>
+        </>
+      ) : (
+        <p>No god. Next in {secs(gapLeft || GOD_GAP_TICKS)}s.</p>
+      )}
+      {aimed && <p className="small">{god!.name} is aiming at {STAGES[aimed.stage].name}.</p>}
+      {pending.slice(0, 1).map(({ w }) => (
+        <p key={w.stage} className="small">
+          {STAGES[w.stage].powers.strike} on {STAGES[w.stage].name} lands in {Math.max(0, secs(Math.min(...w.strikes.map((b) => b.at)) - s.tick))}s.
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/** The god's bar: five powers in this world's names, keys 1-5. */
+function PowersBar({ s, view, sowing, onSow, onPower, onFlip }: { s: Snapshot; view: View; sowing: boolean; onSow: () => void; onPower: (p: GodPower, f?: Family) => void; onFlip: () => void }): ReactNode {
+  const st = STAGES[s.stage];
+  const blurb: Record<GodPower, string> = {
+    sow: "A full new deposit on an empty tile",
+    bless: "Everyone in it but you harvests twice as fast, 5 seconds",
+    hush: "Nothing in it can be taken, by hand or machine, 10 seconds",
+    gift: `A finished ${buildingName(st, "datacentre")}, free, wherever one fits`,
+    strike: "Lands in 3 seconds: stock destroyed, buildings fall, the ground dies",
+  };
+  const on = (p: GodPower): boolean => view.tool === "god" && view.god?.power === p;
+  const hover = view.hover;
+  const preview = view.tool === "god" && view.god && hover ? godPreview(s, view.god, hover[0], hover[1], "") : null;
+  return (
+    <div className="panel bottom powers-bar" role="toolbar" aria-label="God powers">
+      {s.mode === "cosmos" && (
+        <span className="aim small">
+          Aiming at <strong>{st.name}</strong> ([ ])
+        </span>
+      )}
+      {GOD_POWERS.map((p, i) => (
+        <button key={p} type="button" className={`build ${on(p) || (p === "sow" && sowing) ? "on" : ""}`} aria-pressed={on(p)} title={blurb[p]} onClick={() => (p === "sow" ? onSow() : onPower(p))}>
+          <span className="key">{i + 1}</span>
+          <span className="bname">{powerName(st, p)}</span>
+          <span className="cost">{blurb[p].split(",")[0].split(":")[0]}</span>
+        </button>
+      ))}
+      {sowing && (
+        <span className="sow-pick" role="group" aria-label="Sow what">
+          {FAMILIES.map((f) => (
+            <button key={f} type="button" className={view.god?.power === "sow" && view.god.family === f ? "on" : ""} onClick={() => onPower("sow", f)}>
+              {st.families[f].label}
+            </button>
+          ))}
+        </span>
+      )}
+      <span className="sep" aria-hidden="true" />
+      <button type="button" className="tool" onClick={onFlip}>
+        Build (Tab)
+      </button>
+      {preview && <p className={`preview small ${preview.ok ? "" : "bad"}`}>{preview.text}</p>}
+    </div>
+  );
+}
+
+/** The four cards a newcomer to a cosmos room chooses from, or "deal me one". */
+function FactionCards({ s, me, onPick }: { s: Snapshot; me: Player; onPick: (f: FactionId | "deal") => void }): ReactNode {
+  const secs = me.dealAt !== undefined ? Math.max(0, Math.ceil(((me.dealAt - s.tick) * TICK_MS) / 1000)) : null;
+  const room = asRoom(s);
+  return (
+    <div className="overlay center" role="dialog" aria-modal="true" aria-labelledby="fc-h">
+      <div className="card factions">
+        <h2 id="fc-h">Four divisions of the Plenty Cooperative</h2>
+        <p className="small">Each wants something the others spend or need. Pick one, or be dealt one{secs !== null ? ` (in ${secs}s if you don't)` : ""}. You can change until you first harvest or build.</p>
+        <div className="cards">
+          {FACTION_IDS.map((f) => {
+            const d = FACTIONS[f];
+            const problem = s.pick === "deal" ? "the host deals factions in this room" : factionProblem(room, me, f);
+            const held = Object.values(s.players).filter((p) => p.connected && p.faction === f);
+            return (
+              <button key={f} type="button" className="fcard" disabled={!!problem} onClick={() => onPick(f)} style={{ borderColor: d.colour }} aria-describedby={`fc-${f}`}>
+                <span className="fname">
+                  <Badge f={f} /> {d.name}
+                </span>
+                <em>{d.doctrine}</em>
+                <span id={`fc-${f}`} className="small">
+                  {d.uniqueText} Goal: {d.goal}. {d.needs}
+                  {held.length ? ` Now: ${held.map((p) => p.name + (p.bot ? " (bot)" : "")).join(", ")}.` : ""}
+                  {problem ? ` ${problem}.` : ""}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {s.pick !== "choose" && (
+          <button type="button" onClick={() => onPick("deal")} autoFocus>
+            Deal me one
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Each faction's own measure beside its par, in words: no ranking, no winner. */
+function FactionPanel({ s }: { s: Snapshot }): ReactNode {
+  return (
+    <div className="panel factions-panel" aria-label="Factions">
+      <h2>Each faction, by its own measure</h2>
+      <ul>
+        {FACTION_IDS.map((f) => (
+          <li key={f}>
+            <Badge f={f} /> <strong>{FACTIONS[f].name}</strong> {factionLine(s, f)}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** A Snapshot's faction measure, worked out from what the client has: the summaries stand in for the worlds. */
+function factionLine(s: Snapshot, f: FactionId): string {
+  const room = asRoom(s);
+  return measureText(room, f);
+}
+/**
+ * The room as the shared rules see it, from what a client holds: the viewed
+ * world in full, the others as stand-ins built from their summaries (enough
+ * for the faction measures, fuel and launch checks, which only read their
+ * phase and life).
+ */
+function asRoom(s: Snapshot): Parameters<typeof measureText>[0] {
+  const full = { initial: 1, remaining: 1, extracted: 0, destroyed: 0 };
+  const worlds = s.summaries.map((w, i) =>
+    i === s.viewing ? W(s) : { stage: w.stage, spent: w.spent, lifeEnd: w.life, ledger: { matter: full, mineral: full, coolant: full }, tiles: [{ t: 0, life: w.life }] },
+  );
+  return { ...s, worlds } as never;
 }
 
 /** What you carry and the tools you've made: yours alone, unlike the stockpile below it. */
@@ -618,7 +915,7 @@ function Pack({ s, me, onCraft, onDeposit }: { s: Snapshot; me: Player; onCraft:
   );
 }
 
-function Economy({ s }: { s: Snapshot }): ReactNode {
+function Economy({ s, me, onTrade }: { s: Snapshot; me: Player | undefined; onTrade: () => void }): ReactNode {
   const st = STAGES[s.stage];
   const e = s.econ;
   // the shortage most of the machine is waiting on, so nobody has to inspect buildings one by one
@@ -627,17 +924,27 @@ function Economy({ s }: { s: Snapshot }): ReactNode {
   for (const b of idle) tally.set(b.status, (tally.get(b.status) ?? 0) + 1);
   const top = [...tally].sort((a, b) => b[1] - a[1])[0];
   const bottleneck = top ? { n: idle.length, why: top[0] } : null;
+  const cosmos = s.mode === "cosmos";
+  const f = me?.faction;
+  const pool = cosmos ? (f ? (s.stock[f] ?? { matter: 0, mineral: 0, coolant: 0 }) : null) : s.inventory;
   return (
     <div className="panel left">
-      <h2>Stockpile (shared)</h2>
-      <ul className="inv">
-        {FAMILIES.map((f) => (
-          <li key={f}>
-            <span className="swatch" style={{ background: st.palette[f] }} aria-hidden="true" />
-            {st.families[f].label}: <strong>{s.inventory[f]}</strong>
-          </li>
-        ))}
-      </ul>
+      <h2>{cosmos ? (f ? <><Badge f={f} /> {FACTIONS[f].name} stockpile on {st.name}</> : "No faction yet") : "Stockpile (shared)"}</h2>
+      {pool && (
+        <ul className="inv">
+          {FAMILIES.map((fam) => (
+            <li key={fam}>
+              <span className="swatch" style={{ background: st.palette[fam] }} aria-hidden="true" />
+              {st.families[fam].label}: <strong>{pool[fam]}</strong>
+            </li>
+          ))}
+        </ul>
+      )}
+      {cosmos && f && me?.world === s.viewing && (
+        <button type="button" onClick={onTrade}>
+          Give to another faction…
+        </button>
+      )}
       <ul className="inv small">
         <li>
           Power {e.energyUsed}/{e.energySupply}
@@ -651,9 +958,130 @@ function Economy({ s }: { s: Snapshot }): ReactNode {
       </ul>
       {bottleneck && (
         <p className="small bottleneck">
-          <strong>⚠ {bottleneck.n} idle</strong>, mostly “{bottleneck.why.replace(/^(idle|unserved|throttled): /, "")}”
+          <strong>⚠ {bottleneck.n} idle</strong>, mostly “{bottleneck.why.replace(/^(idle|unserved|throttled|dormant): /, "")}”
         </p>
       )}
+    </div>
+  );
+}
+
+/** Give stock to another faction on this world: free and instant, which is how deals happen. */
+function TradePanel({ s, me, onGive, onClose }: { s: Snapshot; me: Player; onGive: (to: FactionId, cargo: Record<Family, number>) => void; onClose: () => void }): ReactNode {
+  const st = STAGES[s.stage];
+  const others = FACTION_IDS.filter((f) => f !== me.faction);
+  const [to, setTo] = useState<FactionId>(others[0]);
+  const [cargo, setCargo] = useState<Record<Family, number>>({ matter: 0, mineral: 0, coolant: 0 });
+  const have = s.stock[me.faction!] ?? { matter: 0, mineral: 0, coolant: 0 };
+  return (
+    <div className="panel inspect" role="dialog" aria-label="Give to another faction">
+      <h2>Give to another faction on {st.name}</h2>
+      <label>
+        To{" "}
+        <select value={to} onChange={(e) => setTo(e.target.value as FactionId)}>
+          {others.map((f) => (
+            <option key={f} value={f}>
+              {FACTIONS[f].name}
+            </option>
+          ))}
+        </select>
+      </label>
+      {FAMILIES.map((f) => (
+        <label key={f} className="cargo">
+          {st.families[f].label} (have {have[f]})
+          <input type="number" min={0} max={have[f]} value={cargo[f]} onChange={(e) => setCargo({ ...cargo, [f]: Math.max(0, Math.min(have[f], Math.floor(Number(e.target.value) || 0))) })} />
+        </label>
+      ))}
+      <div className="row">
+        <button type="button" onClick={() => onGive(to, cargo)}>
+          Give, now
+        </button>
+        <button type="button" onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Where to, who goes, what cargo, fuel and flight time, in words, before you commit. */
+function LaunchPanel({ s, me, pad, onLaunch, onClose }: { s: Snapshot; me: Player; pad: Building; onLaunch: (c: { k: "launch"; x: number; y: number; to: number; cargo: Record<Family, number>; to_f?: FactionId; go: boolean }) => void; onClose: () => void }): ReactNode {
+  const st = STAGES[s.stage];
+  const options = s.summaries.map((w, i) => ({ w, i })).filter(({ w, i }) => i !== s.viewing && !w.spent);
+  const [to, setTo] = useState(options[0]?.i ?? 0);
+  const [go, setGo] = useState(true);
+  const [toF, setToF] = useState<FactionId | undefined>(undefined);
+  const [cargo, setCargo] = useState<Record<Family, number>>({ matter: 0, mineral: 0, coolant: 0 });
+  const room = asRoom(s);
+  const c = { k: "launch" as const, x: pad.x, y: pad.y, to, cargo, to_f: toF, go };
+  const plan = launchPlan(room, { ...me }, c);
+  const owner = pad.f ? `the ${FACTIONS[pad.f].name}` : "nobody";
+  const stock = me.faction ? (s.stock[me.faction] ?? { matter: 0, mineral: 0, coolant: 0 }) : { matter: 0, mineral: 0, coolant: 0 };
+  const total = FAMILIES.reduce((a, f) => a + cargo[f], 0);
+  return (
+    <div className="panel inspect launch" role="dialog" aria-label="Launch">
+      <h2>{buildingName(st, "pad")}, built by {owner}</h2>
+      {s.spent ? (
+        <p className="small">{st.name} is spent: you can leave free, to the nearest living world.</p>
+      ) : (
+        <>
+          <label>
+            To{" "}
+            <select value={to} onChange={(e) => setTo(Number(e.target.value))}>
+              {options.map(({ w, i }) => (
+                <option key={i} value={i}>
+                  {STAGES[w.stage].name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={go} onChange={(e) => setGo(e.target.checked)} /> I go too (my pack comes free)
+          </label>
+          {FAMILIES.map((f) => (
+            <label key={f} className="cargo">
+              {st.families[f].label} (stockpile {stock[f]})
+              <input type="number" min={0} max={SHIP_CARGO} value={cargo[f]} onChange={(e) => setCargo({ ...cargo, [f]: Math.max(0, Math.min(SHIP_CARGO, Math.floor(Number(e.target.value) || 0))) })} />
+            </label>
+          ))}
+          <label>
+            Address the cargo to{" "}
+            <select value={toF ?? ""} onChange={(e) => setToF((e.target.value || undefined) as FactionId | undefined)}>
+              <option value="">my own faction</option>
+              {FACTION_IDS.filter((f) => f !== me.faction).map((f) => (
+                <option key={f} value={f}>
+                  the {FACTIONS[f].name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
+      <p className="small" role="status">
+        {plan.ok
+          ? `${go ? "You fly" : "The ship flies"} to ${STAGES[s.summaries[plan.to]?.stage ?? 0].name} in ${Math.round((plan.ticks * TICK_MS) / 1000)}s` +
+            (plan.free ? ", free of fuel." : `, burning ${FAMILIES.filter((f) => plan.fuel[f]).map((f) => `${plan.fuel[f]} ${st.families[f].label}`).join(" and ")}.`) +
+            (total ? ` Cargo ${total} of ${SHIP_CARGO}${FAMILIES.some((f) => plan.fee[f]) ? `, less ${owner}'s tenth (${FAMILIES.reduce((a, f) => a + plan.fee[f], 0)})` : ""}.` : "")
+          : `✕ ${plan.reason}`}
+      </p>
+      <div className="row">
+        <button type="button" disabled={!plan.ok} onClick={() => onLaunch(c)}>
+          Launch
+        </button>
+        <button type="button" onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InFlight({ s, me }: { s: Snapshot; me: Player }): ReactNode {
+  const ship = s.ships.find((sh) => sh.id === me.ship);
+  if (!ship) return null;
+  const secs = Math.max(0, Math.ceil(((ship.arrives - s.tick) * TICK_MS) / 1000));
+  return (
+    <div className="flight" role="status">
+      In flight to <strong>{STAGES[s.summaries[ship.to]?.stage ?? 0].name}</strong>: {secs}s. You can still look at any world, and still be a god.
     </div>
   );
 }
@@ -710,14 +1138,19 @@ function LastFrontier({ s, you, onVote }: { s: Snapshot; you: string; onVote: (o
   );
 }
 
-function BuildBar({ s, me, view, onPick, onTool }: { s: Snapshot; me: Player | undefined; view: View; onPick: (t: BuildingType) => void; onTool: (t: Tool) => void }): ReactNode {
+function BuildBar({ s, me, view, onWorld, onPick, onTool, god, onFlip }: { s: Snapshot; me: Player | undefined; view: View; onWorld: boolean; onPick: (t: BuildingType) => void; onTool: (t: Tool) => void; god: boolean; onFlip: () => void }): ReactNode {
   const st = STAGES[s.stage];
+  const f = me?.faction;
+  const types = buildable(s, W(s), f);
+  const pool = s.mode === "cosmos" ? (f ? s.stock[f] : undefined) : s.inventory;
   return (
     <div className="panel bottom" role="toolbar" aria-label="Build and tools">
-      {st.buildings.map((type, i) => {
+      {!onWorld && s.mode === "cosmos" && <span className="small">Only looking at {st.name}: nothing here can be built from afar.</span>}
+      {types.map((type, i) => {
         const def = BUILDINGS[type];
-        const short = FAMILIES.filter((f) => (def.cost[f] ?? 0) > s.inventory[f] + (me?.pack[f] ?? 0));
-        const cost = FAMILIES.filter((f) => def.cost[f]).map((f) => `${def.cost[f]} ${st.families[f].label}`).join(", ");
+        const cost = costOf(type, s.mode === "cosmos" ? f : undefined);
+        const short = FAMILIES.filter((fam) => cost[fam] > (pool?.[fam] ?? 0) + (me?.pack[fam] ?? 0));
+        const costText = FAMILIES.filter((fam) => cost[fam]).map((fam) => `${cost[fam]} ${st.families[fam].label}`).join(", ");
         return (
           <button
             key={type}
@@ -725,14 +1158,15 @@ function BuildBar({ s, me, view, onPick, onTool }: { s: Snapshot; me: Player | u
             className={`build ${view.build === type ? "on" : ""} ${short.length ? "short" : ""}`}
             aria-pressed={view.build === type}
             title={def.blurb}
-            aria-label={`${buildingName(st, type)}, costs ${cost || "nothing"}${short.length ? ", can't afford yet" : ""}`}
+            disabled={!onWorld}
+            aria-label={`${buildingName(st, type)}, costs ${costText || "nothing"}${short.length ? ", can't afford yet" : ""}`}
             onClick={() => onPick(type)}
           >
             <span className="key">{i + 1}</span>
             <span className="bname">{buildingName(st, type)}</span>
             <span className="cost">
               {short.length ? "✕ " : ""}
-              {cost || "free"}
+              {costText || "free"}
             </span>
           </button>
         );
@@ -743,6 +1177,11 @@ function BuildBar({ s, me, view, onPick, onTool }: { s: Snapshot; me: Player | u
           {{ harvest: "Harvest (E)", inspect: "Inspect (I)", demolish: "Take down (X)", mark: "Name (N)", build: "", god: "" }[t]}
         </button>
       ))}
+      {god && (
+        <button type="button" className="tool" onClick={onFlip}>
+          Powers (Tab)
+        </button>
+      )}
     </div>
   );
 }
@@ -758,11 +1197,15 @@ function Log({ s, client }: { s: Snapshot; client: GameClient }): ReactNode {
   );
 }
 
-function Inspect({ s, b, youId, host, onDemolish, onClose }: { s: Snapshot; b: Building | undefined; youId: string; host: boolean; onDemolish: (b: Building) => void; onClose: () => void }): ReactNode {
+function Inspect({ s, b, youId, host, onDemolish, onReserve, onClose }: { s: Snapshot; b: Building | undefined; youId: string; host: boolean; onDemolish: (b: Building) => void; onReserve?: (x: number, y: number) => void; onClose: () => void }): ReactNode {
   if (!b) return null;
+  // a Steward beside a machine can reserve the deposit it's working
+  const besides = onReserve && (b.type === "extractor" || b.type === "seeder")
+    ? [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => [b.x + dx, b.y + dy]).find(([x, y]) => x >= 0 && y >= 0 && x < s.w && y < s.w && s.tiles[y * s.w + x].d && s.tiles[y * s.w + x].amt > 0)
+    : undefined;
   const st = STAGES[s.stage];
   const def = BUILDINGS[b.type];
-  const owner = b.owner ? (s.players[b.owner]?.name ?? "someone") : "the Cooperative";
+  const owner = (b.owner ? (s.players[b.owner]?.name ?? "someone") : b.f ? "a machine" : "the Cooperative") + (b.f ? ` of the ${FACTIONS[b.f].name}` : "") + (b.gift ? ", a god's gift" : "");
   const done = b.work >= def.build * 10;
   const io: string[] = [];
   if (def.energy) io.push(def.energy > 0 ? `+${def.energy * (b.type === "solar" ? st.solarScale : 1)} power` : `uses ${-def.energy} power`);
@@ -771,7 +1214,8 @@ function Inspect({ s, b, youId, host, onDemolish, onClose }: { s: Snapshot; b: B
   if (def.coolantUse) io.push(`drinks ${def.coolantUse} ${st.families.coolant.label}`);
   if (def.fuelUse) io.push(`burns ${def.fuelUse} ${st.families.matter.label}`);
   if (def.extract) io.push(`harvests ${def.extract} from a neighbour`);
-  const canDemolish = !def.protected && (def.renderValue ? host : b.owner === youId || host);
+  const myF = s.players[youId]?.faction;
+  const canDemolish = !def.protected && (def.renderValue ? host : b.owner === youId || host || (!!b.f && b.f === myF));
   return (
     <div className="panel inspect" role="dialog" aria-label={`${buildingName(st, b.type)} details`}>
       <h2>{b.name ?? buildingName(st, b.type)}</h2>
@@ -783,7 +1227,12 @@ function Inspect({ s, b, youId, host, onDemolish, onClose }: { s: Snapshot; b: B
       <div className="row">
         {canDemolish && (
           <button type="button" onClick={() => onDemolish(b)}>
-            {def.renderValue ? `Render down (+${def.renderValue} energy, forever)` : "Take down (half back)"}
+            {def.renderValue ? `Render down (+${def.renderValue} energy, forever)` : b.gift ? "Take down (it was free: nothing back)" : "Take down (half back)"}
+          </button>
+        )}
+        {besides && onReserve && (
+          <button type="button" onClick={() => onReserve(besides[0], besides[1])}>
+            Reserve the deposit beside it ({FAMILIES.filter((f) => RESERVE_COST[f]).map((f) => `${RESERVE_COST[f]} ${STAGES[s.stage].families[f].label}`).join(", ")})
           </button>
         )}
         <button type="button" onClick={onClose}>Close</button>
@@ -792,7 +1241,7 @@ function Inspect({ s, b, youId, host, onDemolish, onClose }: { s: Snapshot; b: B
   );
 }
 
-function Help({ onClose, st }: { onClose: () => void; st: (typeof STAGES)[number] }): ReactNode {
+function Help({ onClose, st, cosmos }: { onClose: () => void; st: (typeof STAGES)[number]; cosmos: boolean }): ReactNode {
   return (
     <div className="overlay center" role="dialog" aria-modal="true" aria-labelledby="help-h">
       <div className="card help">
@@ -806,8 +1255,12 @@ function Help({ onClose, st }: { onClose: () => void; st: (typeof STAGES)[number
         <p>What you gather by hand goes into your own pack. Building spends your pack first and the shared stockpile after it; machines fill the stockpile and run on it, so deposit what they need.</p>
         <p>Tools are made from your pack and make your own harvesting quicker: a Cutter, a Pick and a Scoop, one for each kind of stock. A rough one can be made anywhere; a fine one needs you beside finished homes. You keep them from world to world.</p>
         <p>Buildings remember who built them; only the builder or the host can take one down.</p>
-        <p>In a world hosted with gods, someone here becomes a god every 30 seconds. A god can raise a datacentre for nothing, put a bomb down, plant new stock, or lay an aura that doubles everyone else's harvesting speed for 5 seconds. The host can turn gods off and on.</p>
-        <p>When every deposit on this world is gone, the room moves on together. There are five worlds.</p>
+        <p>With gods on, there's a god half the time: 30 seconds with one, 30 without. A god has five powers and can use them as often as they like: Sow new stock, Bless (quicker hands), Hush (nothing taken), Gift a free datacentre, or Strike. Each world has its own names for them. <kbd>Tab</kbd> flips between Powers and Build, <kbd>1</kbd>–<kbd>5</kbd> pick a power, hold <kbd>Enter</kbd> or click to use it, <kbd>Esc</kbd> puts it down.{cosmos ? <> <kbd>[</kbd> <kbd>]</kbd> aim at another world.</> : null}</p>
+        {cosmos ? (
+          <p>All five worlds run at once. <kbd>M</kbd> opens the map; click a world to look at it, which is free. To go there, use a Launch Pad. You belong to one of four factions, each with its own stockpile on each world; give stock to another with “Give to another faction”. Each faction is measured by its own goal, and no faction can reach it alone.</p>
+        ) : (
+          <p>When every deposit on this world is gone, the room moves on together. There are five worlds.</p>
+        )}
         <p><strong>{st.name}:</strong> {MECHANIC_HINT[st.mechanic]}</p>
         <button type="button" onClick={onClose} autoFocus>Back to the world</button>
       </div>
@@ -851,7 +1304,7 @@ function Transition({ s }: { s: Snapshot }): ReactNode {
         <h2>{st.departure}</h2>
         <table>
           <thead>
-            <tr><th scope="col">Stock</th><th scope="col">Was</th><th scope="col">Extracted</th><th scope="col">Destroyed</th></tr>
+            <tr><th scope="col">Stock</th><th scope="col">Was</th><th scope="col">Extracted</th><th scope="col">Destroyed</th><th scope="col">Sown</th></tr>
           </thead>
           <tbody>
             {FAMILIES.map((f) => (
@@ -860,6 +1313,7 @@ function Transition({ s }: { s: Snapshot }): ReactNode {
                 <td>{sum.ledger[f].initial}</td>
                 <td>{sum.ledger[f].extracted}</td>
                 <td>{sum.ledger[f].destroyed}</td>
+                <td>{f === "matter" ? (sum.sown ?? 0) : ""}</td>
               </tr>
             ))}
           </tbody>
@@ -876,6 +1330,7 @@ function Transition({ s }: { s: Snapshot }): ReactNode {
 
 function Ending({ s }: { s: Snapshot }): ReactNode {
   const total = s.history.reduce((a, h) => a + FAMILIES.reduce((b, f) => b + h.ledger[f].extracted + h.ledger[f].destroyed, 0), 0);
+  const humans = Object.values(s.players).filter((p) => !p.bot);
   const [busy, setBusy] = useState(false);
   const [hidden, setHidden] = useState(false);
   if (hidden)
@@ -888,7 +1343,7 @@ function Ending({ s }: { s: Snapshot }): ReactNode {
     );
   const restraint = s.phase.k === "ended" && s.phase.how === "restraint";
   const left = FAMILIES.reduce((a, f) => a + s.ledger[f].remaining, 0);
-  const hands = `${Object.keys(s.players).length} pair${Object.keys(s.players).length === 1 ? "" : "s"} of hands`;
+  const hands = `${humans.length} pair${humans.length === 1 ? "" : "s"} of hands`;
   return (
     <div className="overlay center ending" role="dialog" aria-labelledby="end-h">
       <div className={`card ${restraint ? "dawn" : "dark"}`}>
@@ -919,18 +1374,47 @@ function Ending({ s }: { s: Snapshot }): ReactNode {
         </ul>
         <h3>Who did it</h3>
         <ul>
-          {Object.values(s.players).map((p) => (
+          {Object.values(s.players).filter((p) => !p.bot || p.stats.harvested || p.stats.built).map((p) => (
             <li key={p.id}>
-              {p.name}: harvested {p.stats.harvested}, built {p.stats.built}, helped {p.stats.helped} times
+              {p.faction ? <Badge f={p.faction} /> : null}
+              {p.name}
+              {p.bot ? " (bot)" : ""}: harvested {p.stats.harvested}, built {p.stats.built}, helped {p.stats.helped} times
+            </li>
+          ))}
+          {Object.values(s.players).filter((p) => p.god.turns > 0).map((p) => (
+            <li key={`g-${p.id}`}>
+              {p.name}, as a god ({p.god.turns} turn{p.god.turns === 1 ? "" : "s"}): sowed {p.god.sown}, destroyed {p.god.destroyed}, felled {p.god.felled} buildings, gifted {p.god.gifted} datacentres, {p.god.blessed} harvests made under their Bless, {Math.round((p.god.hushed * TICK_MS) / 1000)} seconds of Hush
             </li>
           ))}
         </ul>
+        {s.mode === "cosmos" && (
+          <>
+            <h3>Each faction, by its own measure</h3>
+            <ul>
+              {FACTION_IDS.map((f) => (
+                <li key={f}>
+                  <Badge f={f} /> The {FACTIONS[f].name} {factionLine(s, f)} {reachedPar(asRoom(s), f) ? "Reached." : "Not reached."}
+                </li>
+              ))}
+            </ul>
+            <h3>Who took what, world by world</h3>
+            <ul>
+              {s.history.map((h, i) => (
+                <li key={i}>
+                  {STAGES.find((x) => x.id === h.stage)?.name}:{" "}
+                  {FACTION_IDS.filter((f) => h.took?.[f]).map((f) => `the ${FACTIONS[f].name} ${h.took![f]}`).join(", ") || "nothing by hand or machine"}
+                  {h.sown ? `; ${h.sown} sown by gods` : ""}.
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
         <button
           type="button"
           disabled={busy}
           onClick={async () => {
             setBusy(true);
-            const res = await fetch("/api/rooms", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pace: s.pace }) });
+            const res = await fetch("/api/rooms", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pace: s.pace, mode: s.mode, gods: s.god.on, pick: s.pick }) });
             const { code } = (await res.json()) as { code: string };
             location.href = `/play/?room=${code}`;
           }}

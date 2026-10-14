@@ -5,6 +5,8 @@ export default function Home() {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [gods, setGods] = useState(false);
+  const [mode, setMode] = useState<"cosmos" | "classic">("cosmos");
+  const [pick, setPick] = useState<"either" | "choose" | "deal">("either");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => setName(localStorage.getItem("plenty:name") ?? ""), []);
@@ -20,7 +22,7 @@ export default function Home() {
     setBusy(true);
     setError("");
     try {
-      const res = await fetch("/api/rooms", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pace, gods }) });
+      const res = await fetch("/api/rooms", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pace, gods, mode, pick }) });
       if (!res.ok) throw new Error(String(res.status));
       const { code } = (await res.json()) as { code: string };
       location.href = `/play/?room=${code}`;
@@ -52,9 +54,28 @@ export default function Home() {
         <fieldset className="host">
           <legend>Host a world</legend>
           <p className="small">You'll be its host: you get the invite link, you can take down anyone's building, and the world's switches are yours.</p>
+          <fieldset className="mode">
+            <legend>Mode</legend>
+            <label className="check">
+              <input type="radio" name="mode" checked={mode === "cosmos"} onChange={() => setMode("cosmos")} /> <span><strong>Cosmos</strong>: all five worlds at once, four rival factions (bots hold the empty ones), ships between worlds.</span>
+            </label>
+            <label className="check">
+              <input type="radio" name="mode" checked={mode === "classic"} onChange={() => setMode("classic")} /> <span><strong>Classic</strong>: one world at a time, one shared stockpile, everyone on the same side.</span>
+            </label>
+          </fieldset>
+          {mode === "cosmos" && (
+            <label>
+              How players pick a faction{" "}
+              <select value={pick} onChange={(e) => setPick(e.target.value as typeof pick)}>
+                <option value="either">choose, or be dealt one</option>
+                <option value="choose">choose</option>
+                <option value="deal">dealt by the room</option>
+              </select>
+            </label>
+          )}
           <label className="check">
-            <input type="checkbox" checked={gods} onChange={(e) => setGods(e.target.checked)} /> With gods: every 30 seconds someone in the world becomes a god, who can raise
-            datacentres, put bombs down, plant new stock and bless the others' harvesting. You can turn gods off and on from inside.
+            <input type="checkbox" checked={gods} onChange={(e) => setGods(e.target.checked)} /> With gods: half the time someone here is a god for 30 seconds, with five powers to give or take
+            as often as they like. Everything they do is signed. You can turn gods off and on from inside.
           </label>
           <div className="row">
             <button type="button" disabled={busy} onClick={() => void create("normal")}>

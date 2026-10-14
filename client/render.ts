@@ -3,10 +3,9 @@
 // visual bible (rounded forms, a soft dark outline, warm light from the upper
 // left, one palette per stage that drains toward its "dead" colour as tiles
 // lose life), so every asset is code in this file and replaceable in one place.
-import { AURA_RADIUS, BOMB_RADIUS, BUILDINGS, STAGES, TICK_MS, type BuildingType, type Family, type GodPower, type StageDef } from "../shared/content.ts";
-import type { Aura, Bomb, Building, Player, Snapshot, Tile } from "../shared/protocol.ts";
-import { averageLife, effectiveLife, lifeCap, placementProblem, plantProblem } from "../shared/sim.ts";
-import type { RoomState } from "../shared/protocol.ts";
+import { BLESS_RADIUS, BUILDINGS, FACTIONS, FAMILIES, HUSH_RADIUS, RESERVE_RADIUS, STAGES, STRIKE_RADIUS, TICK_MS, powerName, type BuildingType, type FactionId, type Family, type GodPower, type Shape, type StageDef } from "../shared/content.ts";
+import type { Building, Player, Snapshot, Strike, Tile, World, Zone } from "../shared/protocol.ts";
+import { averageLife, effectiveLife, lifeCap, placementProblem, sowProblem } from "../shared/sim.ts";
 import { TH, TW, screenToTile, toScreen, toWorld, type Camera } from "./iso.ts";
 import type { GameClient } from "./net.ts";
 
@@ -25,6 +24,78 @@ export interface View {
   reducedMotion: boolean;
   low: boolean;
   zoom: number;
+  /** cosmos: the orbital map is open (a pull-back, drawn over the world) */
+  map: boolean;
+}
+
+/** A Snapshot is the room with the viewed world laid out at the top: that's a World for every per-world rule. */
+const W = (s: Snapshot): World => s as unknown as World;
+
+/** What a god has done, read as a halo: mostly giving, mostly taking, or neither. */
+export function haloOf(p: Pick<Player, "god">): "whole" | "broken" | "plain" {
+  const give = p.god.sown + p.god.hushed / 10;
+  const take = p.god.destroyed + p.god.felled * 10;
+  if (give + take < 1) return "plain";
+  if (give > take * 1.5) return "whole";
+  if (take > give * 1.5) return "broken";
+  return "plain";
+}
+
+/** Words for what a god's power would do at a tile, before they commit: shared by the canvas label and the HUD. */
+export function godPreview(s: Snapshot, g: { power: GodPower; family?: Family }, x: number, y: number, godId: string): { ok: boolean; text: string } {
+  const w = W(s);
+  const st = STAGES[s.stage];
+  const name = powerName(st, g.power);
+  const tile = x >= 0 && y >= 0 && x < s.w && y < s.w ? s.tiles[y * s.w + x] : undefined;
+  if (!tile) return { ok: false, text: "off the map" };
+  const owner = (b: Building): string => (b.owner && s.players[b.owner] ? s.players[b.owner].name : b.f ? `the ${FACTIONS[b.f].name}` : "the Cooperative");
+  const inR = (r: number): { stock: Record<Family, number>; bs: Building[]; marks: string[]; people: string[] } => {
+    const stock = { matter: 0, mineral: 0, coolant: 0 } as Record<Family, number>;
+    const ids = new Set<number>();
+    const marks: string[] = [];
+    for (let ty = Math.floor(y - r); ty <= Math.ceil(y + r); ty++)
+      for (let tx = Math.floor(x - r); tx <= Math.ceil(x + r); tx++) {
+        if (tx < 0 || ty < 0 || tx >= s.w || ty >= s.w || Math.hypot(tx - x, ty - y) > r) continue;
+        const t = s.tiles[ty * s.w + tx];
+        if (t.d && t.amt > 0) stock[t.d] += t.amt;
+        if (t.b) ids.add(t.b);
+        if (t.mark) marks.push(t.mark.name);
+      }
+    const bs = s.buildings.filter((b) => ids.has(b.id) && !BUILDINGS[b.type].protected && !BUILDINGS[b.type].renderValue);
+    const people = Object.values(s.players).filter((p) => p.connected && p.world === s.viewing && p.id !== godId && Math.hypot(p.x - x, p.y - y) <= r).map((p) => p.name);
+    return { stock, bs, marks, people };
+  };
+  const stockText = (st0: Record<Family, number>): string => FAMILIES.filter((f) => st0[f]).map((f) => `${st0[f]} ${st.families[f].label}`).join(", ");
+  switch (g.power) {
+    case "gift": {
+      const problem = placementProblem(s, w, "datacentre", x, y, { free: true });
+      return problem ? { ok: false, text: problem } : { ok: true, text: `${name} here, free and finished. It will drink ${st.families.coolant.label}.` };
+    }
+    case "sow": {
+      if (!g.family) return { ok: false, text: `${name} what?` };
+      const problem = sowProblem(w, x, y, g.family);
+      return problem ? { ok: false, text: problem } : { ok: true, text: `${name}: ${st.families[g.family].perTile} new ${st.families[g.family].label} here.` };
+    }
+    case "strike": {
+      const r = inR(STRIKE_RADIUS);
+      const parts: string[] = [];
+      const stock = stockText(r.stock);
+      if (stock) parts.push(stock);
+      if (r.bs.length) {
+        const named = [...new Set(r.bs.map((b) => `${owner(b)}'s ${st.names[b.type] ?? b.type}`))].slice(0, 2).join(", ");
+        parts.push(`${r.bs.length} building${r.bs.length === 1 ? "" : "s"}, including ${named}`);
+      }
+      let text = `${name} in 3s: destroys ${parts.join(" and ") || "nothing but the ground"}.`;
+      if (r.marks.length) text += ` ${r.marks.join(", ")} ${r.marks.length === 1 ? "is" : "are"} inside.`;
+      return { ok: true, text };
+    }
+    case "bless":
+    case "hush": {
+      const r = inR(g.power === "bless" ? BLESS_RADIUS : HUSH_RADIUS);
+      const who = r.people.length ? r.people.join(", ") : "nobody";
+      return { ok: true, text: g.power === "bless" ? `${name}: quicker hands for 5s. In it now: ${who}.` : `${name}: nothing can be taken here for 10s. In it now: ${who}.` };
+    }
+  }
 }
 
 export const PLAYER_COLOURS = ["#e8735a", "#4f9de0", "#f2c14e", "#8fcf6a", "#b47ce0", "#f08ab8", "#4fc6b8", "#c9905a"];
@@ -68,7 +139,34 @@ const BUILD_LOOK: Record<BuildingType, { colour: string; roof: string; h: number
   plaza: { colour: "#e0c99a", roof: "#e8735a", h: 4 },
   depot: { colour: "#a58a5c", roof: "#6b5a3a", h: 24 },
   engine: { colour: "#6b6f88", roof: "#c9c4ff", h: 28 },
+  pad: { colour: "#9aa1ad", roof: "#e8e2d0", h: 6 },
+  smelter: { colour: "#7a4a3a", roof: "#ff9a4d", h: 18 },
+  seeder: { colour: "#4f8fd9", roof: "#bcd8ff", h: 14 },
 };
+
+/** Draw a faction's shape centred at (x, y): the badge that tells factions apart without colour. */
+export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape, x: number, y: number, r: number, fill: string, stroke = "rgba(20,16,24,0.85)"): void {
+  ctx.beginPath();
+  if (shape === "circle") ctx.arc(x, y, r, 0, Math.PI * 2);
+  else if (shape === "square") ctx.rect(x - r * 0.85, y - r * 0.85, r * 1.7, r * 1.7);
+  else if (shape === "triangle") {
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r * 0.95, y + r * 0.75);
+    ctx.lineTo(x - r * 0.95, y + r * 0.75);
+    ctx.closePath();
+  } else {
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r, y);
+    ctx.lineTo(x, y + r);
+    ctx.lineTo(x - r, y);
+    ctx.closePath();
+  }
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+}
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
@@ -198,8 +296,9 @@ export class Renderer {
     const anim = this.view.reducedMotion ? 0 : now / 1000;
 
     // camera: follow our avatar, pull back during a transition and after the end
-    const [mx, my] = toWorld(this.client.me.x, this.client.me.y);
-    let zoom = this.view.zoom;
+    const mine = s.players[this.client.you]?.world === s.viewing;
+    const [mx, my] = mine ? toWorld(this.client.me.x, this.client.me.y) : toWorld((s.w - 1) / 2, (s.w - 1) / 2);
+    let zoom = this.view.zoom * (mine ? 1 : 0.8);
     if (s.phase.k === "transition") {
       const k = Math.min(1, 1 - (s.phase.until - s.tick) / 90);
       zoom *= 1 - 0.55 * Math.max(0, k);
@@ -239,7 +338,10 @@ export class Renderer {
 
     // overlays on the ground: survey, pressure, ghost footprint
     this.overlays(s, st, anim);
-    for (const a of s.auras) this.aura(s, a, anim);
+    if (s.mode === "cosmos") this.territories(s);
+    for (const r of s.reserves) if (r.until > s.tick) this.ring(r.x, r.y, RESERVE_RADIUS + 0.7, "rgba(63,159,106,0.12)", "rgba(120,220,160,0.8)");
+    for (const a of s.hushes) this.zone(s, a, "hush", anim);
+    for (const a of s.blessings) this.zone(s, a, "bless", anim);
 
     // objects, depth sorted
     const items: { depth: number; draw: () => void }[] = [];
@@ -248,7 +350,7 @@ export class Renderer {
       const y = Math.floor(i / s.w);
       if ((t.d || t.mark) && !t.b && visible(x, y)) items.push({ depth: x + y, draw: () => this.deposit(s, st, t, x, y, anim, i) });
     });
-    for (const b of s.bombs) if (visible(b.x, b.y)) items.push({ depth: b.x + b.y + 0.2, draw: () => this.bomb(s, b, anim) });
+    for (const b of s.strikes) if (visible(b.x, b.y)) items.push({ depth: b.x + b.y + 0.2, draw: () => this.strike(s, b, anim) });
     const behind = this.playersBehind(s);
     for (const b of s.buildings) {
       const n = BUILDINGS[b.type].size;
@@ -256,6 +358,7 @@ export class Renderer {
       items.push({ depth: b.x + b.y + (n - 1) * 2 + 0.1, draw: () => this.building(s, st, b, anim, behind.has(b.id)) });
     }
     for (const p of Object.values(s.players)) {
+      if (p.world !== s.viewing || !p.connected) continue;
       const pos = p.id === this.client.you ? [this.client.me.x, this.client.me.y] : this.client.position(p.id);
       if (!pos) continue;
       items.push({ depth: pos[0] + pos[1] + 0.5, draw: () => this.player(st, p, pos[0], pos[1], anim) });
@@ -273,7 +376,9 @@ export class Renderer {
     this.wildlife(s, st, anim);
     this.effects(now);
     if (this.view.survey) this.surveyArrow(s, st, anim);
+    this.strikeArrows(s);
     this.vignette(s);
+    if (this.view.map && s.mode === "cosmos") this.orbital(s, now);
     this.frameMs = this.frameMs * 0.9 + (performance.now() - t0) * 0.1;
   }
 
@@ -660,6 +765,8 @@ export class Renderer {
       ctx.textBaseline = "middle";
       ctx.fillText(b.status.startsWith("throttled") ? "~" : "!", cx, cy - h - 16 * z + bob);
     }
+    // every building a faction owns wears its shape, not just its colour
+    if (b.f) drawShape(ctx, FACTIONS[b.f].shape, cx + (R[0] - cx) * 0.55, cy - h - 4 * z, 5 * z, FACTIONS[b.f].colour);
     if (this.view.selected === b.id) this.poly([T, R, B, L], "rgba(255,255,255,0.15)", "#fffbe0");
     ctx.globalAlpha = 1;
   }
@@ -781,6 +888,32 @@ export class Renderer {
 
   private player(st: StageDef, p: Player, x: number, y: number, anim: number): void {
     const ctx = this.ctx;
+    const god = this.client.state?.god.id === p.id;
+    const [gx, gy] = toScreen(this.cam, ...toWorld(x, y));
+    if (god) {
+      // drawn 1.4 times larger and off the ground, a soft shadow below, bobbing slowly
+      const lift = (TH * 0.33 + (this.view.reducedMotion ? 0 : Math.sin(anim * 1.6) * 3)) * this.cam.zoom;
+      this.ellipse(gx, gy, 12 * this.cam.zoom, 5 * this.cam.zoom, "rgba(0,0,0,0.18)");
+      // a turn starts with a short column of light
+      const since = this.client.state ? (this.client.state.tick - (this.client.state.god.until - 300)) : 99;
+      if (since >= 0 && since < 12 && !this.view.reducedMotion) {
+        const g = ctx.createLinearGradient(gx, 0, gx, gy);
+        g.addColorStop(0, "rgba(255,250,210,0)");
+        g.addColorStop(1, `rgba(255,250,210,${0.6 * (1 - since / 12)})`);
+        ctx.fillStyle = g;
+        ctx.fillRect(gx - 14 * this.cam.zoom, 0, 28 * this.cam.zoom, gy);
+      }
+      ctx.save();
+      ctx.translate(gx, gy - lift);
+      ctx.scale(1.4, 1.4);
+      ctx.translate(-gx, -gy);
+    }
+    this.avatar(st, p, x, y, anim, god);
+    if (god) ctx.restore();
+  }
+
+  private avatar(st: StageDef, p: Player, x: number, y: number, anim: number, god: boolean): void {
+    const ctx = this.ctx;
     const z = this.cam.zoom;
     const [cx, cy0] = toScreen(this.cam, ...toWorld(x, y));
     const moving = p.dx !== 0 || p.dy !== 0;
@@ -792,7 +925,7 @@ export class Renderer {
     const away = fy < -0.1;
     const cy = cy0 - bob;
     ctx.globalAlpha = p.connected ? 1 : 0.4;
-    this.ellipse(cx, cy0, 9 * z, 4 * z, "rgba(0,0,0,0.2)");
+    if (!god) this.ellipse(cx, cy0, 9 * z, 4 * z, "rgba(0,0,0,0.2)");
     const avatar = st.avatar;
     if (avatar === "drone" || avatar === "probe") {
       const hover = 8 * z + Math.sin(anim * 4 + p.colour) * 2 * z;
@@ -805,23 +938,55 @@ export class Renderer {
         ctx.fillRect(cx + 13 * z, cy - hover - 10 * z, 7 * z, 4 * z);
       }
       if (!away) this.eyes(cx + fx * 4 * z, cy - hover - 9 * z, z);
+      if (god && avatar === "drone") {
+        // at the Sun, a ragged corona
+        for (let k = 0; k < 12; k++) {
+          const a = (k / 12) * Math.PI * 2 + anim * 0.6;
+          const len = (16 + (k % 3) * 4) * z;
+          ctx.strokeStyle = k % 2 ? "#ffd27a" : "#ff9a4d";
+          ctx.lineWidth = 2 * z;
+          ctx.beginPath();
+          ctx.moveTo(cx + Math.cos(a) * 11 * z, cy - hover - 8 * z + Math.sin(a) * 7 * z);
+          ctx.lineTo(cx + Math.cos(a) * len, cy - hover - 8 * z + Math.sin(a) * len * 0.6);
+          ctx.stroke();
+        }
+      } else if (god) {
+        // in the Solar System, six small moons in orbit
+        for (let k = 0; k < 6; k++) {
+          const a = (k / 6) * Math.PI * 2 + anim * 1.2;
+          this.ellipse(cx + Math.cos(a) * 22 * z, cy - hover - 8 * z + Math.sin(a) * 8 * z, 2.5 * z, 2.5 * z, "#d8d4e8", OUTLINE);
+        }
+      }
     } else if (avatar === "wisp") {
       const pulse = 1 + 0.15 * Math.sin(anim * 3 + p.colour);
       ctx.globalAlpha *= 0.35;
       this.ellipse(cx, cy - 16 * z, 16 * z * pulse, 16 * z * pulse, col);
       ctx.globalAlpha = p.connected ? 1 : 0.4;
       this.ellipse(cx, cy - 16 * z, 8 * z, 8 * z, shade(col, 0.5), OUTLINE);
-      if (!away) this.eyes(cx + fx * 3 * z, cy - 16 * z, z);
+      if (god) {
+        // in the Universe, a single open eye in the wisp
+        this.ellipse(cx, cy - 16 * z, 6 * z, 3.5 * z, "#ffffff", OUTLINE);
+        this.ellipse(cx + fx * 1.5 * z, cy - 16 * z, 2.2 * z, 2.2 * z, "#1a1428");
+      } else if (!away) this.eyes(cx + fx * 3 * z, cy - 16 * z, z);
     } else {
       // a round little person (and on Mars, a suit and helmet)
       const step = moving ? Math.sin(anim * 10) * 3 * z : 0;
-      ctx.fillStyle = "#3a2c2c";
-      ctx.fillRect(cx - 4 * z + step * 0.3, cy - 4 * z, 3 * z, 4 * z);
-      ctx.fillRect(cx + 1 * z - step * 0.3, cy - 4 * z, 3 * z, 4 * z);
+      if (god && avatar === "person") {
+        // on Earth a god has no legs: a robe hem trails
+        this.poly([[cx - 8 * z, cy - 8 * z], [cx + 8 * z, cy - 8 * z], [cx + 5 * z + step * 0.4, cy + 2 * z], [cx - 6 * z + step * 0.4, cy + 4 * z]], shade(col, 0.3), OUTLINE);
+      } else {
+        ctx.fillStyle = "#3a2c2c";
+        ctx.fillRect(cx - 4 * z + step * 0.3, cy - 4 * z, 3 * z, 4 * z);
+        ctx.fillRect(cx + 1 * z - step * 0.3, cy - 4 * z, 3 * z, 4 * z);
+      }
       this.ellipse(cx, cy - 11 * z, 8 * z, 9 * z, avatar === "suit" ? "#f2efe8" : col, OUTLINE);
       if (avatar === "suit") this.ellipse(cx, cy - 10 * z, 8 * z, 3 * z, col);
       this.ellipse(cx, cy - 24 * z, 8 * z, 7.5 * z, "#ffe0c2", OUTLINE);
-      if (avatar === "suit") {
+      if (avatar === "suit" && god) {
+        // on Mars a god's visor is solid gold
+        this.ellipse(cx, cy - 24 * z, 10 * z, 9.5 * z, "#e8b923", OUTLINE);
+        this.ellipse(cx - 3 * z, cy - 27 * z, 3 * z, 2 * z, "#fff1a8");
+      } else if (avatar === "suit") {
         ctx.globalAlpha *= 0.5;
         this.ellipse(cx, cy - 24 * z, 10 * z, 9.5 * z, "#bfe6ff", OUTLINE);
         ctx.globalAlpha = p.connected ? 1 : 0.4;
@@ -842,16 +1007,11 @@ export class Renderer {
       }
     }
     const isMe = p.id === this.client.you;
-    const god = this.client.state?.god.id === p.id;
-    if (god) {
-      // a halo, and the word: never colour alone
-      ctx.strokeStyle = "#ffe680";
-      ctx.lineWidth = 2.5 * z;
-      ctx.beginPath();
-      ctx.ellipse(cx, cy - 56 * z, 9 * z, 3.5 * z, 0, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    this.label(`${p.name}${isMe ? " (you)" : ""}${god ? " · god" : ""}${p.connected ? "" : " · away"}`, cx, cy - 44 * z, isMe ? "#fffbe0" : "#ffffff", 11, col);
+    if (god) this.halo(st, p, cx, cy - 46 * z, anim);
+    const badge = p.faction ? ` ${FACTIONS[p.faction].name}` : "";
+    this.label(`${p.name}${p.bot ? " (bot)" : ""}${isMe ? " (you)" : ""}${god ? " · god" : ""}${p.connected ? "" : " · away"}`, cx, cy - 34 * z, isMe ? "#fffbe0" : "#ffffff", 11, col);
+    if (p.faction) drawShape(ctx, FACTIONS[p.faction].shape, cx, cy - 22 * z - (avatar === "person" || avatar === "suit" ? 14 * z : 0) - 20 * z, 4.5 * z, FACTIONS[p.faction].colour);
+    void badge;
     // a compact prompt for your first harvests: what E would do right now
     if (isMe && p.stats.harvested + p.stats.helped < 25 && this.view.tool === "harvest") {
       const hint = this.harvestHint(st, x, y);
@@ -865,6 +1025,39 @@ export class Renderer {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(glyph, cx + 16 * z, cy - 56 * z);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** The halo tells on you: a whole ring for a giver, a ring broken in two for a taker, a plain ring otherwise. */
+  private halo(st: StageDef, p: Player, x: number, y: number, anim: number): void {
+    const ctx = this.ctx;
+    const z = this.cam.zoom;
+    const kind = haloOf(p);
+    ctx.strokeStyle = "#ffe680";
+    ctx.lineWidth = 2.5 * z;
+    if (kind === "broken") {
+      ctx.beginPath();
+      ctx.ellipse(x - 2 * z, y, 9 * z, 3.5 * z, 0, Math.PI * 0.6, Math.PI * 1.45);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(x + 2 * z, y + 1 * z, 9 * z, 3.5 * z, 0.15, Math.PI * 1.6, Math.PI * 2.4);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.ellipse(x, y, 9 * z, 3.5 * z, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (kind === "plain" || this.view.low) return;
+    // a trail to suit the world: petals, snowflakes, sparks or stars for a giver; embers for a taker
+    const glyphs: Record<string, string> = { earth: "#ffb3c7", mars: "#eef8ff", sun: "#fff1a8", system: "#ffffff", universe: "#c9c4ff" };
+    for (let k = 0; k < 5; k++) {
+      const t = ((anim * 0.5 + k / 5) % 1 + 1) % 1;
+      const px = x + Math.sin(k * 2.1 + anim) * 10 * z;
+      const py = y + 6 * z + t * 30 * z;
+      ctx.globalAlpha = 1 - t;
+      if (kind === "broken") this.ellipse(px, py, 1.8 * z, 1.8 * z, k % 2 ? "#ff6a3d" : "#ffb347");
+      else this.ellipse(px, py, 2 * z, 1.4 * z, glyphs[st.id]);
     }
     ctx.globalAlpha = 1;
   }
@@ -915,24 +1108,242 @@ export class Renderer {
     this.poly(pts, fill, stroke);
   }
 
-  private aura(s: Snapshot, a: Aura, anim: number): void {
+  private zone(s: Snapshot, a: Zone, kind: "bless" | "hush", anim: number): void {
     const left = Math.max(0, (a.until - s.tick) * TICK_MS) / 1000;
     if (left <= 0) return;
     const pulse = this.view.reducedMotion ? 0.2 : 0.16 + 0.06 * Math.sin(anim * 5);
-    this.ring(a.x, a.y, AURA_RADIUS, `rgba(255,224,120,${pulse})`, "rgba(255,236,160,0.9)");
     const [cx, cy] = toScreen(this.cam, ...toWorld(a.x, a.y));
-    this.label(`aura: quicker hands, ${Math.ceil(left)}s`, cx, cy, "#fff3c4", 11);
+    if (kind === "bless") {
+      this.ring(a.x, a.y, BLESS_RADIUS, `rgba(255,224,120,${pulse})`, "rgba(255,236,160,0.9)");
+      this.label(`${STAGES[s.stage].powers.bless}: quicker hands, ${Math.ceil(left)}s`, cx, cy, "#fff3c4", 11);
+    } else {
+      // a stillness: cool, dashed, nothing taken inside it
+      this.ctx.setLineDash([6, 5]);
+      this.ring(a.x, a.y, HUSH_RADIUS, `rgba(150,180,230,${pulse})`, "rgba(200,220,255,0.9)");
+      this.ctx.setLineDash([]);
+      this.label(`${STAGES[s.stage].powers.hush}: nothing can be taken here, ${Math.ceil(left)}s`, cx, cy + 14 * this.cam.zoom, "#dfe8ff", 11);
+    }
   }
 
-  private bomb(s: Snapshot, b: Bomb, anim: number): void {
+  private strike(s: Snapshot, b: Strike, anim: number): void {
     const z = this.cam.zoom;
     const [cx, cy] = toScreen(this.cam, ...toWorld(b.x, b.y));
-    this.ring(b.x, b.y, BOMB_RADIUS, "rgba(230,70,60,0.14)", "rgba(255,120,100,0.8)");
+    this.ring(b.x, b.y, STRIKE_RADIUS, "rgba(230,70,60,0.14)", "rgba(255,120,100,0.8)");
     const left = Math.max(0, (b.at - s.tick) * TICK_MS) / 1000;
     const throb = this.view.reducedMotion ? 1 : 1 + 0.1 * Math.sin(anim * 14);
     this.ellipse(cx, cy - 8 * z, 8 * z * throb, 8 * z * throb, "#2b2630", OUTLINE);
     this.ellipse(cx + 5 * z, cy - 16 * z, 2.5 * z, 2.5 * z, "#ffb347");
-    this.label(`bomb: ${left.toFixed(1)}s`, cx, cy - 26 * z, "#ffd1cc", 11);
+    this.label(`${b.by}'s ${STAGES[s.stage].powers.strike}: ${left.toFixed(1)}s`, cx, cy - 26 * z, "#ffd1cc", 11);
+  }
+
+  /** A called Strike off screen gets an arrow at the edge pointing to it. */
+  private strikeArrows(s: Snapshot): void {
+    const ctx = this.ctx;
+    for (const b of s.strikes) {
+      const [sx, sy] = toScreen(this.cam, ...toWorld(b.x, b.y));
+      if (sx > 20 && sx < this.cam.w - 20 && sy > 20 && sy < this.cam.h - 20) continue;
+      const cx = this.cam.w / 2;
+      const cy = this.cam.h / 2;
+      const a = Math.atan2(sy - cy, sx - cx);
+      const k = Math.min((this.cam.w / 2 - 40) / Math.max(1e-6, Math.abs(Math.cos(a))), (this.cam.h / 2 - 40) / Math.max(1e-6, Math.abs(Math.sin(a))));
+      const px = cx + Math.cos(a) * k;
+      const py = cy + Math.sin(a) * k;
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(a);
+      this.poly([[14, 0], [-8, -9], [-8, 9]], "#ff8a7a", OUTLINE);
+      ctx.restore();
+      const left = Math.max(0, ((b.at - s.tick) * TICK_MS) / 1000);
+      this.label(`${STAGES[s.stage].powers.strike} ${left.toFixed(1)}s`, px - Math.cos(a) * 34, py - Math.sin(a) * 18, "#ffd1cc", 10);
+    }
+  }
+
+  /** Each faction's territory: a dashed outline in its own pattern around its buildings, drawn per tile edge. */
+  private territories(s: Snapshot): void {
+    const ctx = this.ctx;
+    const own = new Map<number, FactionId>();
+    for (const b of s.buildings) if (b.f) for (let dy = -1; dy <= BUILDINGS[b.type].size; dy++) for (let dx = -1; dx <= BUILDINGS[b.type].size; dx++) {
+      const x = b.x + dx;
+      const y = b.y + dy;
+      if (x < 0 || y < 0 || x >= s.w || y >= s.w) continue;
+      if (!own.has(y * s.w + x)) own.set(y * s.w + x, b.f);
+    }
+    const c = (a: number, b: number): [number, number] => toScreen(this.cam, ...toWorld(a, b));
+    for (const fid of Object.keys(FACTIONS) as FactionId[]) {
+      ctx.beginPath();
+      for (const [i, f] of own) {
+        if (f !== fid) continue;
+        const x = i % s.w;
+        const y = Math.floor(i / s.w);
+        const edge = (nx: number, ny: number): boolean => own.get(ny * s.w + nx) !== fid || nx < 0 || ny < 0 || nx >= s.w || ny >= s.w;
+        const seg = (a: [number, number], b: [number, number]): void => {
+          ctx.moveTo(a[0], a[1]);
+          ctx.lineTo(b[0], b[1]);
+        };
+        if (edge(x, y - 1)) seg(c(x - 0.5, y - 0.5), c(x + 0.5, y - 0.5));
+        if (edge(x, y + 1)) seg(c(x - 0.5, y + 0.5), c(x + 0.5, y + 0.5));
+        if (edge(x - 1, y)) seg(c(x - 0.5, y - 0.5), c(x - 0.5, y + 0.5));
+        if (edge(x + 1, y)) seg(c(x + 0.5, y - 0.5), c(x + 0.5, y + 0.5));
+      }
+      ctx.setLineDash(FACTIONS[fid].dash.map((d) => d * this.cam.zoom));
+      ctx.strokeStyle = FACTIONS[fid].colour;
+      ctx.lineWidth = 2 * this.cam.zoom;
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  /** The orbital map: five live discs, a pull-back over the world. Returns the disc a screen point falls on. */
+  private discs: { i: number; x: number; y: number; r: number }[] = [];
+  discAt(sx: number, sy: number): number | null {
+    for (const d of this.discs) if (Math.hypot(sx - d.x, sy - d.y) <= d.r + 10) return d.i;
+    return null;
+  }
+
+  private orbital(s: Snapshot, now: number): void {
+    const ctx = this.ctx;
+    const W0 = this.cam.w;
+    const H0 = this.cam.h;
+    ctx.fillStyle = "rgba(8,8,20,0.86)";
+    ctx.fillRect(0, 0, W0, H0);
+    const anim = this.view.reducedMotion ? 0 : now / 1000;
+    const n = s.summaries.length;
+    const gap = W0 / (n + 1);
+    const cy = H0 * 0.47;
+    this.discs = s.summaries.map((w, i) => {
+      const r = Math.max(26, Math.min(gap * 0.36, 30 + STAGES[w.stage].size * 1.3));
+      return { i, x: gap * (i + 1), y: cy + (i % 2 ? -H0 * 0.07 : H0 * 0.07), r };
+    });
+    // the flight path, in flight order
+    ctx.strokeStyle = "rgba(200,200,230,0.25)";
+    ctx.setLineDash([4, 6]);
+    ctx.beginPath();
+    this.discs.forEach((d, k) => (k ? ctx.lineTo(d.x, d.y) : ctx.moveTo(d.x, d.y)));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    s.summaries.forEach((w, i) => {
+      const d = this.discs[i];
+      const st = STAGES[w.stage];
+      const left = w.total ? w.left / w.total : 0;
+      // body: the world's land colour drained toward its dead colour by life; the Sun dims as it's taken
+      const k = w.spent ? 0 : w.life / 100;
+      const body = w.spent ? "rgb(88,86,92)" : mix(st.palette.dead, st.palette.lush, k);
+      if (st.id === "sun" && !w.spent) {
+        const glow = ctx.createRadialGradient(d.x, d.y, d.r * 0.5, d.x, d.y, d.r * 2);
+        glow.addColorStop(0, `rgba(255,220,120,${0.6 * left})`);
+        glow.addColorStop(1, "rgba(255,160,60,0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(d.x - d.r * 2, d.y - d.r * 2, d.r * 4, d.r * 4);
+      }
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+      ctx.fillStyle = body;
+      ctx.fill();
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      if (w.spent) {
+        // grey, cracked and quiet
+        ctx.strokeStyle = "rgba(30,30,36,0.8)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(d.x - d.r * 0.6, d.y - d.r * 0.3);
+        ctx.lineTo(d.x - d.r * 0.1, d.y + d.r * 0.1);
+        ctx.lineTo(d.x + d.r * 0.2, d.y - d.r * 0.4);
+        ctx.moveTo(d.x - d.r * 0.1, d.y + d.r * 0.1);
+        ctx.lineTo(d.x + d.r * 0.1, d.y + d.r * 0.6);
+        ctx.stroke();
+      }
+      // stock left as a ring
+      ctx.strokeStyle = "rgba(255,255,255,0.18)";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r + 7, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = "#fffbe0";
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r + 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * left);
+      ctx.stroke();
+      if (i === s.viewing) {
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.r + 14, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      if (s.god.id && s.god.aim === i) {
+        // the god's world of choice, marked while they aim
+        ctx.strokeStyle = "#ffe680";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.r + 18 + (this.view.reducedMotion ? 0 : 2 * Math.sin(anim * 4)), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      // active god effects: a pulse
+      if (w.strikes.length || w.blessings || w.hushes) {
+        const pr = d.r + 24 + (this.view.reducedMotion ? 0 : ((anim * 20) % 14));
+        ctx.strokeStyle = w.strikes.length ? "rgba(255,120,100,0.8)" : w.hushes ? "rgba(200,220,255,0.7)" : "rgba(255,236,160,0.7)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, pr, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      // players present, as dots
+      w.present.forEach((id, k) => {
+        const p = s.players[id];
+        if (!p) return;
+        const a = (k / Math.max(1, w.present.length)) * Math.PI * 2 + anim * 0.3;
+        const px = d.x + Math.cos(a) * d.r * 0.55;
+        const py = d.y + Math.sin(a) * d.r * 0.55;
+        if (p.faction) drawShape(ctx, FACTIONS[p.faction].shape, px, py, 4.5, FACTIONS[p.faction].colour);
+        else {
+          ctx.beginPath();
+          ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = PLAYER_COLOURS[p.colour % 8];
+          ctx.fill();
+        }
+      });
+      // labels: name, stock left, life
+      this.label(`${st.name}${w.spent ? " · spent" : ""}`, d.x, d.y + d.r + 30, "#ffffff", 12);
+      this.label(w.spent ? `${w.life}% alive at the end` : `${Math.round(left * 100)}% stock left · ${w.life}% alive`, d.x, d.y + d.r + 48, "#e6e3ff", 10);
+      // who has a stake: a stacked bar of building counts per faction, with each faction's shape
+      const total = Object.values(w.stake).reduce((a, b) => a + (b ?? 0), 0);
+      if (total) {
+        const bw = d.r * 2;
+        let x = d.x - bw / 2;
+        const y = d.y + d.r + 60;
+        for (const fid of Object.keys(FACTIONS) as FactionId[]) {
+          const nB = w.stake[fid] ?? 0;
+          if (!nB) continue;
+          const seg = (nB / total) * bw;
+          ctx.fillStyle = FACTIONS[fid].colour;
+          ctx.fillRect(x, y, seg, 9);
+          if (seg > 10) drawShape(ctx, FACTIONS[fid].shape, x + seg / 2, y + 4.5, 3.5, "#ffffff");
+          x += seg;
+        }
+        ctx.strokeStyle = OUTLINE;
+        ctx.strokeRect(d.x - bw / 2, y, bw, 9);
+      }
+      // a line of words for each god effect on it
+      const lines: string[] = [];
+      for (const b of w.strikes) lines.push(`${st.powers.strike} on ${st.name} lands in ${Math.max(0, Math.ceil(((b.at - s.tick) * TICK_MS) / 1000))}s`);
+      if (w.blessings) lines.push(`${st.powers.bless} on ${st.name}`);
+      if (w.hushes) lines.push(`${st.powers.hush} on ${st.name}`);
+      lines.slice(0, 2).forEach((t, k) => this.label(t, d.x, d.y - d.r - 30 - k * 16, "#ffd1cc", 10));
+    });
+    // ships in flight, as moving dots in their faction's shape
+    for (const sh of s.ships) {
+      const a = this.discs[sh.from];
+      const b = this.discs[sh.to];
+      if (!a || !b) continue;
+      const k = Math.max(0, Math.min(1, (s.tick - sh.departs) / Math.max(1, sh.arrives - sh.departs)));
+      const x = a.x + (b.x - a.x) * k;
+      const y = a.y + (b.y - a.y) * k - Math.sin(k * Math.PI) * 30;
+      drawShape(ctx, FACTIONS[sh.f].shape, x, y, 6, FACTIONS[sh.f].colour);
+    }
+    this.label("The cosmos · click a world to look at it · M or Esc to close", W0 / 2, H0 - 90, "#fffbe0", 12);
   }
 
   private ghost(s: Snapshot, st: StageDef): void {
@@ -943,7 +1354,7 @@ export class Renderer {
     if (this.view.tool === "build" && this.view.build) {
       const def = BUILDINGS[this.view.build];
       const me = s.players[this.client.you];
-      const problem = placementProblem(s as RoomState, this.view.build, x, y, me ? { ...me, x: this.client.me.x, y: this.client.me.y } : undefined);
+      const problem = me && me.world !== s.viewing ? "you're only looking at this world" : placementProblem(s, W(s), this.view.build, x, y, { p: me ? { ...me, x: this.client.me.x, y: this.client.me.y } : undefined });
       const pts = this.corners(x, y, def.size);
       this.poly(pts, problem ? "rgba(230,80,70,0.35)" : "rgba(120,230,140,0.35)", problem ? "#ff6b5a" : "#bfffc8");
       const [T, , B] = pts;
@@ -957,24 +1368,13 @@ export class Renderer {
     } else if (this.view.tool === "god" && this.view.god && x >= 0 && y >= 0 && x < s.w && y < s.w) {
       const g = this.view.god;
       const [cx, cy] = toScreen(this.cam, ...toWorld(x, y));
-      let problem: string | null = null;
-      let what = "";
-      if (g.power === "datacentre") {
-        problem = placementProblem(s as RoomState, "datacentre", x, y, undefined, true);
-        what = `raise a ${st.names.datacentre ?? "datacentre"}`;
-        this.poly(this.corners(x, y, BUILDINGS.datacentre.size), problem ? "rgba(230,80,70,0.35)" : "rgba(255,224,120,0.35)", "#ffe680");
-      } else if (g.power === "plant" && g.family) {
-        problem = plantProblem(s, x, y);
-        what = `plant ${st.families[g.family].label}`;
-        this.poly(this.corners(x, y), problem ? "rgba(230,80,70,0.35)" : "rgba(255,224,120,0.35)", "#ffe680");
-      } else if (g.power === "bomb") {
-        what = "put a bomb down";
-        this.ring(x, y, BOMB_RADIUS, "rgba(230,70,60,0.18)", "#ff8a7a");
-      } else {
-        what = "lay an aura";
-        this.ring(x, y, AURA_RADIUS, "rgba(255,224,120,0.18)", "#ffe680");
-      }
-      this.label(problem ? `✕ ${problem}` : `✓ ${what}`, cx, cy + 24 * this.cam.zoom, problem ? "#ffd1cc" : "#fff3c4", 12);
+      const pre = godPreview(s, g, x, y, this.client.you);
+      if (g.power === "gift") this.poly(this.corners(x, y, BUILDINGS.datacentre.size), pre.ok ? "rgba(255,224,120,0.35)" : "rgba(230,80,70,0.35)", "#ffe680");
+      else if (g.power === "sow") this.poly(this.corners(x, y), pre.ok ? "rgba(255,224,120,0.35)" : "rgba(230,80,70,0.35)", "#ffe680");
+      else if (g.power === "strike") this.ring(x, y, STRIKE_RADIUS, "rgba(230,70,60,0.18)", "#ff8a7a");
+      else if (g.power === "hush") this.ring(x, y, HUSH_RADIUS, "rgba(150,180,230,0.18)", "#dfe8ff");
+      else this.ring(x, y, BLESS_RADIUS, "rgba(255,224,120,0.18)", "#ffe680");
+      this.label(pre.ok ? `✓ ${pre.text}` : `✕ ${pre.text}`, cx, cy + 24 * this.cam.zoom, pre.ok ? "#fff3c4" : "#ffd1cc", 12);
     } else if (x >= 0 && y >= 0 && x < s.w && y < s.w) {
       const stroke = this.view.tool === "demolish" ? "#ff8a7a" : this.view.tool === "mark" ? "#ffd27a" : "rgba(255,255,240,0.9)";
       this.poly(this.corners(x, y), "rgba(255,255,255,0.08)", stroke);
@@ -1028,7 +1428,7 @@ export class Renderer {
   private lifeValue = 100;
   private lifeCache(s: Snapshot): number {
     if (performance.now() - this.lifeAt > 1000) {
-      this.lifeValue = averageLife(s);
+      this.lifeValue = averageLife(W(s));
       this.lifeAt = performance.now();
     }
     return this.lifeValue;
@@ -1108,7 +1508,7 @@ export class Renderer {
         ctx.fill();
       } else if (f.kind === "blast") {
         ctx.globalAlpha = Math.max(0, 0.8 - age * 1.6);
-        this.ring(f.x, f.y, BOMB_RADIUS * Math.min(1, 0.3 + age * 3), f.colour, "#ff9a4d");
+        this.ring(f.x, f.y, STRIKE_RADIUS * Math.min(1, 0.3 + age * 3), f.colour, "#ff9a4d");
       } else if (f.kind === "smoke") {
         ctx.globalAlpha = Math.max(0, 0.5 - age / 5);
         ctx.fillStyle = f.colour;

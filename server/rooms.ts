@@ -3,9 +3,10 @@
 // minute, so an empty campaign never advances while its players are away.
 import { randomBytes, randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
-import { MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ClientMsg, type Delta, type Player, type RoomState, type ServerMsg, type Snapshot } from "../shared/protocol.ts";
+import { MAX_MESSAGE_BYTES, PROTOCOL_VERSION, type ClientMsg, type Delta, type FactionPick, type Mode, type Player, type RoomState, type ServerMsg, type Snapshot } from "../shared/protocol.ts";
 import { PACES, TICK_MS, type Pace } from "../shared/content.ts";
-import { applyCommand, createRoom, join, leave, newChanges, tick, type Changes } from "../shared/sim.ts";
+import { applyCommand, createRoom, join, leave, newChanges, summaries, tick, type Changes } from "../shared/sim.ts";
+import { runBots } from "../shared/bots.ts";
 import { loadRoom, roomExists, saveRoom } from "./store.ts";
 
 const SAVE_EVERY_MS = 5000;
@@ -15,6 +16,8 @@ const MAX_CATCHUP_TICKS = 3;
 interface Conn {
   ws: WebSocket;
   pid: string | null;
+  /** the world this browser is looking at: where its deltas come from */
+  view: number;
   tokens: number;
   lastRefill: number;
 }
@@ -32,6 +35,7 @@ interface LiveRoom {
   sentMoves: Map<string, string>;
   sentArchive: number;
   sentHistory: number;
+  sentSummaries: string;
   ch: Changes;
 }
 
@@ -39,12 +43,12 @@ const rooms = new Map<string, LiveRoom>();
 export const stats = { tickMsMax: 0, tickMsLast: 0, bytesOut: 0, msgsIn: 0 };
 
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-export function createNewRoom(pace: Pace, gods = false): string {
+export function createNewRoom(pace: Pace, gods = false, mode: Mode = "classic", pick: FactionPick = "either"): string {
   let code = "";
   do {
     code = Array.from(randomBytes(5), (b) => ALPHABET[b % ALPHABET.length]).join("");
   } while (roomExists(code));
-  const s = createRoom(code, randomBytes(4).readUInt32LE(0), pace, gods);
+  const s = createRoom(code, randomBytes(4).readUInt32LE(0), pace, gods, mode, pick);
   saveRoom(s);
   return code;
 }
@@ -55,18 +59,24 @@ function live(code: string): LiveRoom | null {
   const s = loadRoom(code);
   if (!s) return null;
   for (const p of Object.values(s.players)) {
-    p.connected = false;
+    // bots keep their seats across a reload; people reconnect for themselves
+    if (!p.bot) p.connected = false;
     p.dx = p.dy = 0;
   }
-  r = { s, inc: randomUUID().slice(0, 8), conns: new Set(), dirty: false, lastSave: Date.now(), emptySince: Date.now(), lastTickAt: Date.now(), sentPlayers: new Map(), sentMoves: new Map(), sentArchive: s.archive.length, sentHistory: s.history.length, ch: newChanges() };
+  r = { s, inc: randomUUID().slice(0, 8), conns: new Set(), dirty: false, lastSave: Date.now(), emptySince: Date.now(), lastTickAt: Date.now(), sentPlayers: new Map(), sentMoves: new Map(), sentArchive: s.archive.length, sentHistory: s.history.length, sentSummaries: "", ch: newChanges() };
   rooms.set(code, r);
   return r;
 }
 
-const snapshot = (s: RoomState): Snapshot => {
-  const { tokens: _t, receipts: _r, ...snap } = s;
-  return snap;
+/** The room minus its secrets, with the viewed world's fields laid out at the top. */
+export const snapshot = (s: RoomState, view: number): Snapshot => {
+  const { tokens: _t, receipts: _r, worlds, ...room } = s;
+  const vw = worlds[view] ? view : 0;
+  return { ...room, ...worlds[vw], viewing: vw, summaries: summaries(s) };
 };
+
+/** Where a newly joined or reconnected browser looks first: the world its player stands on. */
+const homeView = (s: RoomState, pid: string): number => Math.max(0, s.players[pid]?.world ?? 0);
 
 function send(c: Conn, msg: ServerMsg): void {
   if (c.ws.readyState !== c.ws.OPEN) return;
@@ -82,7 +92,8 @@ function send(c: Conn, msg: ServerMsg): void {
 
 function welcome(r: LiveRoom, c: Conn): void {
   if (!c.pid) return;
-  send(c, { t: "welcome", v: PROTOCOL_VERSION, inc: r.inc, you: c.pid, token: r.s.tokens[c.pid], snap: snapshot(r.s) });
+  if (!r.s.worlds[c.view]) c.view = 0;
+  send(c, { t: "welcome", v: PROTOCOL_VERSION, inc: r.inc, you: c.pid, token: r.s.tokens[c.pid], snap: snapshot(r.s, c.view) });
 }
 
 function save(r: LiveRoom): void {
@@ -122,27 +133,55 @@ function flush(r: LiveRoom): void {
       moves.push([p.id, r2(x), r2(y), dx, dy, facing]);
     }
   }
-  const any = players.length || moves.length || ch.blasts.length || ch.tiles.size || ch.buildings.size || ch.removed.length || ch.meta || ch.log;
+  // the orbital map's picture of every world, at most once a second and only when it changed
+  let sums: Delta["summaries"];
+  if (s.mode === "cosmos" && (s.tick % 10 === 0 || ch.meta)) {
+    const all = summaries(s);
+    const text = JSON.stringify(all);
+    if (text !== r.sentSummaries) {
+      r.sentSummaries = text;
+      sums = all;
+    }
+  }
+  const any = players.length || moves.length || ch.w.size || ch.meta || ch.logIds.size || sums;
   if (!any) return;
   s.seq++;
-  const d: Delta = { t: "delta", seq: s.seq, gen: s.gen, tick: s.tick, players };
-  if (moves.length) d.moves = moves;
-  if (ch.tiles.size) d.tiles = [...ch.tiles].map((i) => [i, s.tiles[i]]);
-  if (ch.buildings.size) d.buildings = s.buildings.filter((b) => ch.buildings.has(b.id));
-  if (ch.removed.length) d.removed = ch.removed;
+  const base: Delta = { t: "delta", seq: s.seq, gen: s.gen, tick: s.tick, players, vw: 0 };
+  if (moves.length) base.moves = moves;
   if (ch.meta) {
-    d.meta = { inventory: s.inventory, ledger: s.ledger, econ: s.econ, heat: s.heat, reserve: s.reserve, phase: s.phase, hostId: s.hostId, god: s.god, bombs: s.bombs, auras: s.auras };
+    base.meta = { reserve: s.reserve, phase: s.phase, hostId: s.hostId, god: s.god, ships: s.ships, factions: s.factions, computeTotal: s.computeTotal, transit: s.transit };
     // the archive and history only ever grow: resend them only when they have
-    if (s.archive.length !== r.sentArchive) d.meta.archive = s.archive;
-    if (s.history.length !== r.sentHistory) d.meta.history = s.history;
+    if (s.archive.length !== r.sentArchive) base.meta.archive = s.archive;
+    if (s.history.length !== r.sentHistory) base.meta.history = s.history;
     r.sentArchive = s.archive.length;
     r.sentHistory = s.history.length;
   }
-  if (ch.blasts.length) d.blasts = ch.blasts;
-  if (ch.log) d.log = s.log.slice(-ch.log);
+  if (sums) base.summaries = sums;
+  if (ch.logIds.size) base.log = s.log.filter((l) => ch.logIds.has(l.id));
+  // one delta per viewed world, built once and sent to everyone looking at it
+  const byView = new Map<number, Delta>();
+  const forView = (vw: number): Delta => {
+    let d = byView.get(vw);
+    if (d) return d;
+    d = { ...base, vw };
+    const wch = ch.w.get(vw);
+    const w = s.worlds[vw];
+    if (wch && w) {
+      if (wch.tiles.size) d.tiles = [...wch.tiles].map((i) => [i, w.tiles[i]]);
+      if (wch.buildings.size) d.buildings = w.buildings.filter((b) => wch.buildings.has(b.id));
+      if (wch.removed.length) d.removed = wch.removed;
+      if (wch.blasts.length) d.blasts = wch.blasts;
+      if (wch.meta || wch.tiles.size) {
+        const { inventory, stock, ledger, econ, heat, spent, strikes, blessings, hushes, reserves, sown, lifeStart, landed, took } = w;
+        d.world = { inventory, stock, ledger, econ, heat, spent, strikes, blessings, hushes, reserves, sown, lifeStart, landed, took };
+      }
+    }
+    byView.set(vw, d);
+    return d;
+  };
   r.dirty = true;
   r.ch = newChanges();
-  for (const c of r.conns) if (c.pid) send(c, d);
+  for (const c of r.conns) if (c.pid) send(c, forView(c.view));
 }
 
 export function stepAll(): void {
@@ -164,6 +203,8 @@ export function stepAll(): void {
     try {
       for (let i = 0; i < due; i++) {
         tick(r.s, r.ch);
+        // bots play through the same applyCommand as everyone, and only while a human keeps the room awake
+        runBots(r.s, r.ch);
         r.lastTickAt += TICK_MS;
         if (r.ch.boundary) break;
       }
@@ -200,7 +241,7 @@ export function attach(ws: WebSocket, ip: string): void {
     return;
   }
   perIp.set(ip, open + 1);
-  const c: Conn = { ws, pid: null, tokens: 60, lastRefill: Date.now() };
+  const c: Conn = { ws, pid: null, view: 0, tokens: 60, lastRefill: Date.now() };
   let room: LiveRoom | null = null;
   const fail = (reason: string): void => send(c, { t: "error", reason });
 
@@ -249,6 +290,7 @@ export function attach(ws: WebSocket, ip: string): void {
       if (!p) return fail("this room is full");
       room = r;
       c.pid = id;
+      c.view = homeView(s, id);
       r.conns.add(c);
       r.emptySince = null;
       // pending changes go out first, so the snapshot is the exact boundary for later deltas
@@ -262,6 +304,13 @@ export function attach(ws: WebSocket, ip: string): void {
       flush(room);
       return welcome(room, c);
     }
+    if (msg.t === "view") {
+      // looking is free and never presence: a fresh snapshot of the world asked for
+      if (typeof msg.world !== "number" || !Number.isInteger(msg.world) || !room.s.worlds[msg.world]) return fail("no such world");
+      flush(room);
+      c.view = msg.world;
+      return welcome(room, c);
+    }
     if (msg.t === "cmd") {
       if (typeof msg.id !== "string" || msg.id.length < 1 || msg.id.length > 40) return fail("malformed command");
       if (msg.inc !== room.inc) {
@@ -270,7 +319,7 @@ export function attach(ws: WebSocket, ip: string): void {
         return welcome(room, c);
       }
       if (!isRecord(msg.c) || typeof msg.c.k !== "string") return fail("malformed command");
-      const res = applyCommand(room.s, c.pid, msg.id, msg.gen, msg.c, room.ch);
+      const res = applyCommand(room.s, c.pid, msg.id, msg.gen, msg.c, room.ch, msg.w);
       if (msg.c.k !== "move") send(c, res.ok ? { t: "ack", id: msg.id, ok: true } : { t: "ack", id: msg.id, ok: false, reason: res.reason });
       return;
     }
@@ -294,4 +343,6 @@ export function attach(ws: WebSocket, ip: string): void {
 }
 
 export const paceOf = (raw: unknown): Pace => (raw === "rapid" ? "rapid" : "normal");
+export const modeOf = (raw: unknown): Mode => (raw === "classic" ? "classic" : raw === "cosmos" ? "cosmos" : "classic");
+export const pickOf = (raw: unknown): FactionPick => (raw === "choose" || raw === "deal" ? raw : "either");
 export { PACES };

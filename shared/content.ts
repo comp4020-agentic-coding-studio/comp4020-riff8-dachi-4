@@ -20,6 +20,9 @@ export const BUILDING_TYPES = [
   "plaza",
   "depot",
   "engine",
+  "pad",
+  "smelter",
+  "seeder",
 ] as const;
 export type BuildingType = (typeof BUILDING_TYPES)[number];
 
@@ -169,6 +172,37 @@ export const BUILDINGS: Record<BuildingType, BuildingDef> = {
     tall: true,
     blurb: "A whole spent world, running as compute. Render it down for a burst of energy.",
   },
+  pad: {
+    size: 1,
+    cost: { mineral: 4, matter: 2 },
+    build: 2,
+    energy: 0,
+    workers: 0,
+    compute: 0,
+    blurb: "The way off a world, open to everyone. Its builder takes a tenth of any cargo that goes through it.",
+  },
+  smelter: {
+    size: 1,
+    cost: { mineral: 6, matter: 2 },
+    build: 3,
+    energy: -1,
+    workers: 0,
+    compute: 0,
+    pollution: { radius: 1, amount: 2 },
+    blurb: "Foundry only. Turns 3 matter from the Foundry's stockpile into 1 mineral each tick.",
+  },
+  seeder: {
+    size: 1,
+    cost: { mineral: 6, matter: 4 },
+    build: 3,
+    energy: -1,
+    workers: 0,
+    compute: -1,
+    extract: 1,
+    pollution: { radius: 1, amount: 4 },
+    heat: 2,
+    blurb: "Automata only. A harvester that pays for and places a copy of itself beside it every few ticks.",
+  },
 };
 
 export type StageId = "earth" | "mars" | "sun" | "system" | "universe";
@@ -193,6 +227,8 @@ export interface StageDef {
   families: Record<Family, FamilySpec>;
   buildings: BuildingType[];
   names: Partial<Record<BuildingType, string>>;
+  /** what a god's five powers are called here; Gift takes the datacentre's name */
+  powers: Record<Exclude<GodPower, "gift">, string>;
   starter: Bundle;
   landmarks: string[];
   /** solar output multiplier for this stage */
@@ -232,6 +268,7 @@ export const STAGES: StageDef[] = [
       extractor: "Harvester",
       plaza: "Plaza",
     },
+    powers: { sow: "Seed", strike: "Lightning", bless: "Fair wind", hush: "Still air" },
     starter: { matter: 0, mineral: 0, coolant: 0 },
     landmarks: ["The Old Oak", "Heron Pond", "Picnic Hill", "Granite Seat"],
     solarScale: 1,
@@ -268,6 +305,7 @@ export const STAGES: StageDef[] = [
       extractor: "Rover Drill",
       plaza: "Garden Pod",
     },
+    powers: { sow: "Buried spring", strike: "Meteor", bless: "Thin air", hush: "Dust calm" },
     starter: { matter: 20, mineral: 40, coolant: 12 },
     landmarks: ["First Footprint", "Ice Cathedral", "Olympus Lookout"],
     solarScale: 2,
@@ -304,6 +342,7 @@ export const STAGES: StageDef[] = [
       extractor: "Plasma Scoop",
       plaza: "Viewing Deck",
     },
+    powers: { sow: "Kindle", strike: "Flare", bless: "Updraft", hush: "Eclipse" },
     starter: { matter: 20, mineral: 50, coolant: 10 },
     landmarks: ["Morning", "The Last Noon"],
     solarScale: 4,
@@ -340,6 +379,7 @@ export const STAGES: StageDef[] = [
       plaza: "Observation Ring",
       depot: "Cooperative Depot",
     },
+    powers: { sow: "Comet", strike: "Collision", bless: "Slipstream", hush: "Radio silence" },
     starter: { matter: 20, mineral: 40, coolant: 10 },
     landmarks: ["Ceres Pier", "The Long Comet"],
     solarScale: 0,
@@ -375,6 +415,7 @@ export const STAGES: StageDef[] = [
       plaza: "Memorial",
       engine: "World Engine",
     },
+    powers: { sow: "New star", strike: "Supernova", bless: "Fair current", hush: "Dark" },
     starter: { matter: 30, mineral: 50, coolant: 10 },
     landmarks: ["Andromeda", "The Quiet Arm"],
     solarScale: 0,
@@ -451,30 +492,186 @@ export const SALVAGE_RATE = 0.5;
 export const HEAT_LIMIT = 70;
 
 /**
- * Gods: when a room has them on, one connected player at a time is a god for
- * GOD_TERM_TICKS, then another is chosen. A god can raise a finished
- * datacentre for nothing, drop a bomb, plant a new deposit, or lay an aura
- * that speeds up everyone else's hands. The host can turn gods off and on.
+ * Gods: while a room has them on, there is a god half the time, GOD_TURN_TICKS
+ * with one and GOD_GAP_TICKS without. A god can use any of five powers as
+ * often as they like during their turn; the clock is the only limit. The
+ * numbers below are the rules that keep the world sound however often they act.
  */
-export const GOD_POWERS = ["datacentre", "bomb", "plant", "aura"] as const;
+export const GOD_POWERS = ["sow", "bless", "hush", "gift", "strike"] as const;
 export type GodPower = (typeof GOD_POWERS)[number];
-export const GOD_TERM_TICKS = 300; // 30 s
-/** ticks between one god's acts */
-export const GOD_COOLDOWN_TICKS = 10;
-export const BOMB_FUSE_TICKS = 30;
-/** tiles from the bomb, centre to centre, that are flattened */
-export const BOMB_RADIUS = 2.3;
-export const MAX_BOMBS = 3;
-export const AURA_TICKS = 50; // 5 s
-export const AURA_RADIUS = 4;
-export const MAX_AURAS = 2;
-/** inside an aura a mortal's harvest cooldown is divided by this, to no less than AURA_MIN_COOLDOWN */
-export const AURA_SPEEDUP = 2;
-export const AURA_MIN_COOLDOWN = 2;
+export const GOD_TURN_TICKS = 300; // 30 s
+export const GOD_GAP_TICKS = 300; // 30 s
+export const STRIKE_FUSE_TICKS = 30;
+/** tiles from the strike, centre to centre, that are flattened */
+export const STRIKE_RADIUS = 2.3;
+export const BLESS_TICKS = 50; // 5 s
+export const BLESS_RADIUS = 4;
+/** inside a blessing a mortal's harvest cooldown is divided by this, to no less than BLESS_MIN_COOLDOWN */
+export const BLESS_SPEEDUP = 2;
+export const BLESS_MIN_COOLDOWN = 2;
+export const HUSH_TICKS = 100; // 10 s
+export const HUSH_RADIUS = 3;
+/** a tile that was hushed can't be hushed again until this long after it lapsed */
+export const HUSH_REST_TICKS = 100;
+/** sown stock on a world is capped at this share of what it was generated with */
+export const SOW_CAP = 0.2;
+/** the Sun's twist: a Flare adds this much heat and an Eclipse sheds it */
+export const SUN_TWIST_HEAT = 15;
+/** Earth's twist: a Seed lifts its eight neighbours' life by this */
+export const EARTH_SEED_LIFT = 20;
+
+/** Cosmos: journeys between worlds. */
+export const PAD_FEE = 0.1;
+export const LAUNCH_FUEL: Bundle = { matter: 6, mineral: 0, coolant: 3 };
+export const SHIP_PASSENGERS = 4;
+export const SHIP_CARGO = 20;
+/** seconds of flight: a base plus a step for each world between, in STAGES order */
+export const FLIGHT_BASE_TICKS = 100;
+export const FLIGHT_STEP_TICKS = 80;
+export const flightTicks = (from: number, to: number): number => FLIGHT_BASE_TICKS + FLIGHT_STEP_TICKS * Math.abs(from - to);
+
+export const FACTION_IDS = ["foundry", "automata", "brokers", "stewards"] as const;
+export type FactionId = (typeof FACTION_IDS)[number];
+export type Shape = "square" | "circle" | "triangle" | "diamond";
+
+export interface FactionDef {
+  id: FactionId;
+  name: string;
+  doctrine: string;
+  passive: string;
+  unique: BuildingType | "reserve";
+  uniqueText: string;
+  weakness: string;
+  goal: string;
+  needs: string;
+  colour: string;
+  shape: Shape;
+  /** territory outline dash pattern, in pixels at zoom 1 */
+  dash: number[];
+  /** the faction's own measure reaches this; set once from the baseline tournament (docs/TESTING.md) */
+  par: number;
+  /** cost multiplier per building type for this faction */
+  costs: Partial<Record<BuildingType, number>>;
+  /** fuel multiplier on launches */
+  fuel: number;
+  /** hand harvest cooldown multiplier */
+  hands: number;
+  cannot: BuildingType[];
+}
+
+export const FACTIONS: Record<FactionId, FactionDef> = {
+  foundry: {
+    id: "foundry",
+    name: "Foundry",
+    doctrine: "Burn it.",
+    passive: "Furnaces give double power on the same fuel.",
+    unique: "smelter",
+    uniqueText: "Smelter: turns 3 matter into 1 mineral each tick.",
+    weakness: "Furnace smoke reaches one tile further, and it browns land everyone shares.",
+    goal: "its share of everything taken from every world, by hand or machine",
+    needs: "Needs Brokers to carry its output off Earth. Threatens the Stewards' land.",
+    colour: "#d9653b",
+    shape: "square",
+    dash: [10, 4],
+    par: 0.3,
+    costs: {},
+    fuel: 1,
+    hands: 1,
+    cannot: [],
+  },
+  automata: {
+    id: "automata",
+    name: "Automata",
+    doctrine: "Let the machine do it.",
+    passive: "Harvesters cost a quarter less.",
+    unique: "seeder",
+    uniqueText: "Seeder: a harvester that places copies of itself, up to 12 a world.",
+    weakness: "Hand harvesting is half as fast. Needs power and compute from someone.",
+    goal: "its share of all compute supplied, in compute-ticks",
+    needs: "Needs the Foundry's power. Its machines drink the water everyone shares.",
+    colour: "#4f8fd9",
+    shape: "circle",
+    dash: [2, 4],
+    par: 0.5,
+    costs: { extractor: 0.75, seeder: 0.75 },
+    fuel: 1,
+    hands: 2,
+    cannot: [],
+  },
+  brokers: {
+    id: "brokers",
+    name: "Brokers",
+    doctrine: "Everything moves through us.",
+    passive: "Launch Pads cost half, and the fuel is half.",
+    unique: "pad",
+    uniqueText: "Launch Pad: the way off a world, taking a tenth of all cargo.",
+    weakness: "Can't build Harvesters. Earns only when other people consume.",
+    goal: "units carried through Pads it built",
+    needs: "Needs everyone else to have something to ship. Threatens nobody directly.",
+    colour: "#c9a227",
+    shape: "triangle",
+    dash: [12, 4, 2, 4],
+    par: 40,
+    costs: { pad: 0.5 },
+    fuel: 0.5,
+    hands: 1,
+    cannot: ["extractor", "seeder"],
+  },
+  stewards: {
+    id: "stewards",
+    name: "Stewards",
+    doctrine: "Keep some back.",
+    passive: "Sun Gardens cost 30% less.",
+    unique: "reserve",
+    uniqueText: "Reserve: locks a deposit and its neighbours from harvest for 60 seconds.",
+    weakness: "Hand harvesting is a quarter slower. Can't build Furnaces.",
+    goal: "the average life of the land across the five worlds, taken as each ended or as it stands",
+    needs: "Needs the others to slow down or stop. Threatens everyone's harvest.",
+    colour: "#3f9f6a",
+    shape: "diamond",
+    dash: [6, 6],
+    par: 40,
+    costs: { solar: 0.7 },
+    fuel: 1,
+    hands: 1.25,
+    cannot: ["furnace"],
+  },
+};
+/** a building only one faction may raise, and what the others pay for one (the Pad) */
+export const UNIQUE: Partial<Record<BuildingType, { only?: FactionId; othersPay?: number }>> = {
+  smelter: { only: "foundry" },
+  seeder: { only: "automata" },
+  pad: { othersPay: 2 },
+};
+export const SMELTER_IN = 3;
+export const SEEDER_EVERY = 6; // economy ticks between copies
+export const SEEDER_CAP = 12; // per world
+export const RESERVE_TICKS = 600; // 60 s
+export const RESERVE_REST_TICKS = 600;
+export const RESERVE_RADIUS = 1;
+export const RESERVE_COST: Bundle = { matter: 4, mineral: 2, coolant: 0 };
+/** the faction furthest from its par pays this much less fuel; 0 turns the lever off */
+export const CATCH_UP_FUEL = 0.25;
+/** a faction left without a human is played by its bot again after this long */
+export const BOT_RETURN_TICKS = 300;
+/** how often a bot may act: one command every this many ticks */
+export const BOT_EVERY_TICKS = 3;
+/** a human who ignores the faction cards is dealt one after this long */
+export const DEAL_AFTER_TICKS = 300;
 
 export const EMOTES = ["wave", "heart", "laugh", "wow", "sad", "point"] as const;
 export type Emote = (typeof EMOTES)[number];
 
+const DEFAULT_NAMES: Partial<Record<BuildingType, string>> = { pad: "Launch Pad", smelter: "Smelter", seeder: "Seeder" };
+
 export function buildingName(stage: StageDef, type: BuildingType): string {
-  return stage.names[type] ?? type[0].toUpperCase() + type.slice(1);
+  return stage.names[type] ?? DEFAULT_NAMES[type] ?? type[0].toUpperCase() + type.slice(1);
 }
+
+/** What a god's power is called on this world. */
+export function powerName(stage: StageDef, power: GodPower): string {
+  return power === "gift" ? buildingName(stage, "datacentre") : stage.powers[power];
+}
+
+/** Which spent world a World Engine in the Universe stands for. */
+export const ENGINE_OF: Record<string, StageId> = { "Earth Engine": "earth", "Mars Engine": "mars", "Sun Husk Engine": "sun" };

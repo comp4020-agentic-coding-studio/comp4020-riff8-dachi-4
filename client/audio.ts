@@ -142,6 +142,21 @@ export class Sound {
     this.tone(70, 0.6, "effects", "sawtooth", 0.2, -50);
     this.tone(45, 0.9, "effects", "square", 0.12, -25);
   }
+  /** a god's turn starts: a rising tone */
+  ascend(): void {
+    this.tone(330, 0.8, "effects", "sine", 0.12, 330);
+    setTimeout(() => this.tone(495, 0.6, "effects", "triangle", 0.08, 250), 160);
+  }
+  /** a Bless laid: a soft shimmer */
+  shimmer(): void {
+    for (let k = 0; k < 4; k++) setTimeout(() => this.tone(1200 + k * 180, 0.25, "effects", "sine", 0.04), k * 50);
+  }
+  launch(): void {
+    this.tone(220, 0.7, "effects", "triangle", 0.1, 440);
+  }
+  landing(): void {
+    this.tone(440, 0.5, "effects", "sine", 0.07, -200);
+  }
   reject(): void {
     this.tone(160, 0.2, "effects", "sawtooth", 0.06, -40);
   }

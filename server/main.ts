@@ -9,7 +9,7 @@ import { WebSocketServer } from "ws";
 import { marked } from "marked";
 import { MAX_MESSAGE_BYTES } from "../shared/protocol.ts";
 import { TICK_MS } from "../shared/content.ts";
-import { attach, createNewRoom, paceOf, roomCount, saveAll, stats, stepAll } from "./rooms.ts";
+import { attach, createNewRoom, modeOf, paceOf, pickOf, roomCount, saveAll, stats, stepAll } from "./rooms.ts";
 import { pruneRooms } from "./store.ts";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -138,8 +138,11 @@ const server = createServer(async (req, res) => {
         return json(res, 400, { error: "malformed JSON" });
       }
       const pace = paceOf((body as { pace?: unknown } | null)?.pace);
-      const gods = (body as { gods?: unknown } | null)?.gods === true;
-      return json(res, 201, { code: createNewRoom(pace, gods), pace, gods });
+      const b = body as { gods?: unknown; mode?: unknown; pick?: unknown } | null;
+      const gods = b?.gods === true;
+      const mode = modeOf(b?.mode);
+      const pick = pickOf(b?.pick);
+      return json(res, 201, { code: createNewRoom(pace, gods, mode, pick), pace, gods, mode, pick });
     }
     if (req.method === "GET" || req.method === "HEAD") {
       if (await serveStatic(url.pathname, res)) return;

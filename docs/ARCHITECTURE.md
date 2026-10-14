@@ -17,7 +17,7 @@ browser                                      one Fly machine (shared-cpu-1x, 256
 
 | Directory | Holds |
 | --- | --- |
-| `shared/` | content and balance data, the protocol types, world generation, and the simulation; pure TypeScript, no I/O, imported by both sides |
+| `shared/` | content and balance data, the protocol types, world generation, the simulation, and the faction bots' planner (`bots.ts`); pure TypeScript, no I/O, imported by both sides |
 | `server/` | the HTTP and WebSocket server, live room management, SQLite storage |
 | `app/` | Next.js routes: the front page and the play shell (the client-only boundary) |
 | `client/` | the browser game: network client, renderer, audio, HUD |
@@ -31,11 +31,17 @@ browser                                      one Fly machine (shared-cpu-1x, 256
 - **`ws` over a room framework.** Rooms, sequencing and deduplication are about 300 lines in `server/rooms.ts`; Colyseus would have hidden exactly the parts the prompt asks to get right.
 - **`node:sqlite`, one row per room.** No native module to build, one file on the volume, a single UPSERT per save.
 
+## Rooms and worlds
+
+A `RoomState` holds a list of `World`s. Every per-world rule in `shared/sim.ts` (placement, harvesting, the economy, gods' acts, exhaustion) takes a world, not the room. A classic room has one world and replaces it at each stage boundary, so classic plays exactly as it did before cosmos. A cosmos room has five from the first tick, ticks every one each economy tick, and adds what spans worlds at room level: one Bottled Sun, ships in flight and the `transit` totals, factions, and the god. `ledgerHolds` checks every world, and `transitHolds` checks that stock launched minus stock landed is exactly what the ships hold.
+
+Bots are ordinary `Player`s with `bot: true` and no socket. `server/rooms.ts` calls `runBots` after each tick while at least one human is connected; the planner in `shared/bots.ts` returns commands that go through `applyCommand` like anyone's. The tournament (`spec/balance.test.ts`) and `scripts/playbot.ts` use the same planner.
+
 ## Authority
 
 The server owns every room's state; the browser renders it and sends intentions. All mutation goes through `applyCommand` and `tick` in `shared/sim.ts`, called one at a time on Node's single thread, so every mutation is serialised. Two players placing on the same tile, two builds spending the same balance, two hands on the last unit: whichever command the server reads first wins; the other gets a reason. Payment and occupancy are committed in the same synchronous block with nothing between them that can fail.
 
-Every command is validated server-side: session (the socket's player), membership, stage generation, phase, integer and in-bounds coordinates, finite movement vectors, range (2.2 tiles to harvest, 8 to build), cooldowns, footprint and terrain, affordability, ownership, and string length.
+Every command is validated server-side: session (the socket's player), membership, stage generation, phase, the world it was meant for (a ground command for a world the player is only viewing, or while in flight, is refused; only a god's powers may name another world), integer and in-bounds coordinates, finite movement vectors, range (2.2 tiles to harvest, 8 to build), cooldowns, footprint and terrain, affordability, ownership, and string length.
 
 **Movement** is a continuous intent (a direction vector); the server integrates it at 10 Hz. There are no collisions, so the browser predicts its own avatar exactly and eases toward the server's answer, snapping only if more than 1.5 tiles off. Other avatars are interpolated two ticks behind the latest update.
 
@@ -43,19 +49,20 @@ Every command is validated server-side: session (the socket's player), membershi
 
 ## Protocol
 
-Defined in [`shared/protocol.ts`](../shared/protocol.ts), JSON text frames, `PROTOCOL_VERSION = 3`. A client and server on different versions refuse each other ("this page is out of date: reload it").
+Defined in [`shared/protocol.ts`](../shared/protocol.ts), JSON text frames, `PROTOCOL_VERSION = 4`. A client and server on different versions refuse each other ("this page is out of date: reload it").
 
 Client to server:
 
 - `hello {v, room, token?, name}`: join; a known token resumes that player, anything else makes a new one
-- `cmd {id, inc, gen, c}`: an intention (`move`, `harvest`, `build`, `demolish`, `emote`, `mark`, `craft`, `deposit`, `god`, `gods`, `stop`) with a client-chosen id, the room incarnation and the stage generation it was meant for
+- `cmd {id, inc, gen, c, w?}`: an intention (`move`, `harvest`, `build`, `demolish`, `emote`, `mark`, `craft`, `deposit`, `god`, `gods`, `aim`, `stop`, `faction`, `transfer`, `launch`, `reserve`) with a client-chosen id, the room incarnation, the stage generation and the world it was meant for
+- `view {world}`: look at another world; answered with a fresh snapshot of it, and the connection's deltas come from that world from then on. Looking is never presence.
 - `sync`: ask for a fresh snapshot
 - `ping {n}`
 
 Server to client:
 
-- `welcome {v, inc, you, token, snap}`: a full snapshot (state minus other players' tokens and receipts) and its sequence number
-- `delta {seq, gen, tick, players, moves?, tiles?, buildings?, removed?, meta?, log?}`: changes since the previous delta, sent only when something changed, at most once per tick
+- `welcome {v, inc, you, token, snap}`: a full snapshot (state minus tokens and receipts) with the viewed world's fields laid out at the top (`viewing` says which), and a summary of every world for the map
+- `delta {seq, gen, tick, vw, players, moves?, tiles?, buildings?, removed?, blasts?, world?, meta?, summaries?, log?}`: changes since the previous delta, sent only when something changed, at most once per tick. Tiles, buildings, blasts and `world` belong to world `vw`, the one that connection views; one delta is built per viewed world and shared by everyone viewing it. `summaries` (life, stock left, stake per faction, players present, active god effects) for every world goes out at most once a second, and only when it changed. A folded log line ("called Lightning 14 times") arrives as a new line that names the one it replaces.
 - `ack {id, ok, reason?}`: for every command except `move`
 - `error {reason}`, `pong {n}`
 
@@ -74,7 +81,7 @@ Server to client:
 ## Persistence
 
 - **Store**: `DATA_DIR/plenty.db` (SQLite, WAL), table `rooms(code, schema, state, saved_at)`, the whole `RoomState` as JSON. World, sequence and receipts are in one row, so they can't disagree about what was applied.
-- **Schema**: `SCHEMA_VERSION` in each row; migrations run in order against `PRAGMA user_version` at boot (`server/store.ts`). A saved room from schema 1 is upgraded as it loads (players gain an empty pack and no tools) and from schema 2 (gods, switched off); any other version refuses to load rather than load wrongly.
+- **Schema**: `SCHEMA_VERSION` (4) in each row; migrations run in order against `PRAGMA user_version` at boot (`server/store.ts`). A saved room from an older schema is upgraded as it loads: 1 → 2 gives players an empty pack and no tools, and 3 → 4 turns the single-world room into a classic room with one world and gods off (rooms saved by `main` and by the `packs-tools-gods` branch are schema 3). Any other version refuses to load rather than load wrongly.
 - **Save frequency**: every 5 s while a room has changed, immediately when a room empties, immediately at every stage boundary (before anyone is told about it), and for every room on SIGTERM or SIGINT.
 - **Maximum rollback**: 5 s of play after an abrupt crash. A rolled-back command's receipt rolls back with it, so a retry after recovery is treated as new, not wrongly acknowledged as done. The spec kills the server with SIGKILL to check this.
 - **Transitions survive crashes**: the transition state is saved before it's announced, and the next world is a pure function of the saved seed and stage, so a restart during a transition finishes it exactly once with the same map and no doubled carryover.
@@ -84,7 +91,7 @@ Server to client:
 
 Room codes are five characters from a 31-letter alphabet without lookalikes. A code identifies a room; it doesn't authorise anything. An address can create 60 rooms an hour, and rooms nobody ever joined are deleted after a day. Authority is the per-player token the server mints on first join (18 random bytes), which the browser keeps in localStorage per room and presents on reconnect. A second tab with the same token takes over from the first. A room seats eight connected players; it remembers up to 32 identities, and past that forgets the one gone longest (its buildings stay, credited to "someone"), so browsers that came once and left can never fill a room.
 
-A room with nobody connected pauses: no ticks, saved, and unloaded after a minute. Its next visitor loads it under a new incarnation. Why, and what that costs, is [ADR 0001](adr/0001-empty-rooms-pause.md).
+A room with nobody connected pauses: no ticks, saved, and unloaded after a minute. Its next visitor loads it under a new incarnation. Why, and what that costs, is [ADR 0001](adr/0001-empty-rooms-pause.md). In a cosmos room every world runs while any human is connected, and bots alone never keep it running ([ADR 0002](adr/0002-worlds-run-unattended.md)).
 
 ## Deployment on Fly.io
 
@@ -92,7 +99,7 @@ A room with nobody connected pauses: no ticks, saved, and unloaded after a minut
 
 - **One owner per room.** One machine runs every room, and the deploy command passes `--ha=false`. A Fly volume attaches to one machine at a time, so an old process and its replacement can never both hold the database during a deploy: Fly stops the old machine (it receives SIGINT, saves every room, closes sockets with 1012) before starting the new one on the same volume. Adding replicas would need a room-to-owner map and `fly-replay` routing of the WebSocket handshake; that's deliberately not built.
 - **Autostop.** Fly's proxy counts open connections, and every player holds a WebSocket, so the machine stays up while anyone is playing and stops when the last player leaves. That matches the pause-when-empty policy: a stopped machine has nothing it should have been simulating.
-- **Capacity.** Measured locally at 20 connections across 6 live rooms: about 1 ms of simulation per step, 104 MB resident. The 256 MB machine is not the constraint at the scale this course tests; the honest limit is availability (one machine, seconds of downtime per deploy).
+- **Capacity.** Measured locally at 20 connections across 6 live rooms: about 1 ms of simulation per step, 104 MB resident. A cosmos room of five built-up worlds, four bots and eight humans' worth of commands a tick costs a median 0.1 ms a tick ([`TESTING.md`](TESTING.md#performance)). The 256 MB machine is not the constraint at the scale this course tests; the honest limit is availability (one machine, seconds of downtime per deploy).
 - **Health**: `GET /api/health` reports rooms, tick time, memory and traffic.
 - **Security**: every write (`POST /api/rooms`) and every WebSocket upgrade must carry an `Origin` matching the request's own host; framing is refused (`X-Frame-Options: DENY`, `frame-ancestors 'none'`); no secrets are needed at runtime.
 

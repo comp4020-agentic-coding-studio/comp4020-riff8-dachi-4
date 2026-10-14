@@ -85,20 +85,66 @@ Each world is data in `STAGES` plus one mechanic switch in the economy tick. Map
 
 **The restraint ending.** In the Universe, and only there, a panel offers to stop: "N units of the Universe are left. You could stop here and leave them alone, for good." Each player votes; harvesting or building takes your vote back, so you can't vote to stop with your hands still in the till. When everyone present agrees, the campaign ends with the rest still out there (recorded in the ledger as _remaining_ and in the archive as "left alone"), the music keeps playing, and the card reads "You stopped. The Cooperative's machine idles. It could have finished. Nobody asked it to." Absent players can't block it, and a holdout's dropped connection never triggers it: if they leave, someone still here confirms by voting again. It's irreversible and it costs the full ending, so it only means something to a group that has argued about it. Restraint is offered only at the last world on purpose: by then every earlier world is already spent, so stopping saves something without pretending to undo anything.
 
+## Two modes
+
+A room is hosted in one of two modes, fixed for its life. **Classic** is everything above: one world at a time, one shared stockpile, everyone on the same side. **Cosmos** (the default on the front page) runs all five worlds at once, splits the players into four rival factions, and moves people and stock between worlds by ship. Both use the same simulation: a cosmos world is a classic world, run alongside the others, with faction rules on top.
+
+## The cosmos
+
+**All five worlds from the first tick.** Each has its own tiles, buildings, books, heat and economy, and every world's economy ticks whether or not anyone is standing on it ([ADR 0002](adr/0002-worlds-run-unattended.md)). Nothing locks a route: the worlds' own rules gate them. Mars runs only inside a dome's air; the Sun's heat throttles output; the Solar System and the Universe have no sunlight, and every machine there draws on one Bottled Sun for the whole cosmos, filled 4 energy for every unit of plasma anyone takes at the Sun. Until someone burns the Sun, those two worlds have hands and nothing else.
+
+**Being somewhere, and looking.** You stand on one world and can walk, harvest and build only there. The orbital map (`M`, or the world chips) lets anyone look at any world for free; looking is not presence, and the build bar says so. A faction's first person on a world brings that world's starter crate, once.
+
+**Journeys.** A Launch Pad is the way off a world, open to everyone; its builder takes a tenth of any cargo through it, always less than the cargo. A launch costs 6 matter and 3 coolant from the faction's stockpile there, and takes 10 seconds plus 8 per step along Earth, Mars, Sun, Solar System, Universe. A ship carries its launcher and up to 20 units, addressed to their own faction or another's, landing in the destination's names. Packs travel free with their owner. A spent world never traps anyone: from it you can always leave free, from the ground, to the nearest living world. Stock in flight is in a ship and nowhere else, and an invariant beside the ledger checks it.
+
+**Stockpiles.** Each faction has its own stockpile on each world and spends only that. There's no common pool. `transfer` gives stock to another faction on the same world, free and instant, which is how deals are struck. Power, compute, workers and coolant draw stay world-wide, so a Dome or a Relay helps every machine in its reach whoever built it, and a builder pays for what others use.
+
+**Ending.** The campaign ends when every world is spent, or when the Universe's restraint vote passes, which is offered only once the other four are spent. Only humans vote. A spent world stays on the map as a grey remnant, and its World Engine in the Universe wakes.
+
+## Factions
+
+| Faction | Doctrine | Passive | Unique | Weakness | Goal |
+| --- | --- | --- | --- | --- | --- |
+| Foundry ■ | Burn it. | Furnaces give double power. | Smelter: 3 matter → 1 mineral a tick. | Smoke reaches a tile further. Builds no Launch Pads. | its share of everything taken |
+| Automata ● | Let the machine do it. | Harvesters a quarter cheaper. | Seeder: a harvester that pays for and places copies of itself, up to 12 a world. | Hands half as fast. Builds no power of its own. | compute-ticks its machines supply |
+| Brokers ▲ | Everything moves through us. | Pads and fuel half price. | Launch Pad (others pay 1.5×). | Can't build Harvesters. | units carried through its Pads |
+| Stewards ◆ | Keep some back. | Sun Gardens 30% cheaper. | Reserve: a deposit and its neighbours, locked for 60 s. | Hands a quarter slower. Can't build Furnaces. | land life on the worlds it reaches, against how it began, over the campaign |
+
+Each goal is a number beside a par, set once from the tournament and never edited since: facts, not a score. Nobody wins.
+
+### What they are arguing
+
+The Foundry is the honest version of the whole game: take, burn, grow. It needs someone to carry its output off Earth (it builds no Pads) and its smoke spends the land everyone shares, which is the land the Stewards are measured on. The Automata want the machine to do it, but build no power of their own, so their datacentres run on the Foundry's furnaces or the Stewards' gardens, and drink the water every faction's machines need. The Brokers make nothing; they're paid when other people move what they've taken, so they want everyone else busy and travelling, and lose most when the others are slowed down. The Stewards want the land kept, which means they want the other three to slow down or stop, and the only tool they have that isn't persuasion is the Reserve, which holds a deposit back for a minute and then always lets go.
+
+None of them is the right answer. A table of Stewards spends nothing and goes nowhere: the Bottled Sun stays empty, the outer worlds are hands only, and their own measure counts every world they never reached as dead. A table of Foundry spends everything fast, and the furnaces it relies on burn the groves it would have harvested next. The Brokers' measure is only as large as everyone else's appetite. Each faction's goal needs another's behaviour, or is ruined by it, and the tournament shows it: take one faction out and the one that needed it falls (numbers in [TESTING.md](TESTING.md#the-tournament)).
+
+### Joining, and bots
+
+On joining a cosmos room you see four cards (name, doctrine, unique building, goal, and who it needs and threatens) and either choose one that isn't full (`ceil(humans ÷ 4)`) or are dealt one. The host can make the room choose-only, deal-only, or either. You can change until you first harvest or build.
+
+Every faction always has an occupant. One with no human is played by a server-side bot, labelled "(bot)", which takes the same commands through the same validation as anyone, from a pure planner in `shared/bots.ts`. A human joining a faction takes its seat at once, keeping its buildings and stockpiles; if every human leaves, the bot is back 30 seconds later. Bots take no seat among the eight, never vote, and never keep a room awake.
+
 ## Gods
 
-A room can be hosted with gods (`POST /api/rooms {gods: true}`, the tick box on the front page). While they are on, one connected player is a god for 30 seconds, then another is chosen, never the same one twice running when anyone else is there; a god who disconnects is replaced on the next tick. The host can switch gods off and on (`gods`), which is the only control over them.
+A room can be hosted with gods, in either mode, and the host can switch them on or off at any time (switching off ends the current turn and leaves anything already called to land). While they're on, there's a god half the time: 30 seconds with one, 30 seconds with none. The next god is the faction with fewest turns (in classic, the person), ties broken by the room's dice, then the human in it with fewest turns, or its bot if it has no human; never the same player twice running when anyone else can be.
 
-A god may act once a second, from anywhere:
+A god has five powers and no budget: as many acts as they like while the turn lasts, from any distance, and in cosmos on any world (`[` and `]`, or a click on the map). The clock is the only limit, and every act is signed in the log and visible to everyone.
 
-- **Datacentre**: finished, free, owned by the god. Every placement rule but cost and reach still applies, so a deposit with stock is never covered.
-- **Bomb**: 3-second fuse, radius 2.3 tiles, at most three ticking. Stock in reach moves from `remaining` to `destroyed`; buildings fall with no salvage, except the Depot and World Engines; the ground's life goes to zero. A bomb that destroys the last stock ends the world like any other exhaustion. Bombs are cleared at a world boundary.
-- **Plant**: a full deposit (the world's `perTile`) on any tile with nothing built and nothing growing, except the star and the spent worlds. It adds to `initial` and `remaining` together, so the ledger still balances. This is the one way a world's stock can grow, which means a room with gods can put off a world's end for as long as its gods keep planting; that is what the host's switch is for.
-- **Aura**: radius 4, 5 seconds, at most two. A non-god inside one has their harvest cooldown halved (to no less than 0.2 s), on top of their tool.
+| Power | What it does | Kind to the players | Kind to the world |
+| --- | --- | --- | --- |
+| Sow | a full new deposit on an empty tile, up to a fifth of what the world began with | more to take | heals the ground, but puts off the world's end |
+| Bless | radius 4, 5 s: everyone in it but the god harvests twice as fast | quicker hands | a faster death for what they stand on |
+| Hush | radius 3, 10 s: nothing in it can be harvested, by hand or machine; the ground then rests 10 s before it can be hushed again | locks the only pond while datacentres run dry | saves the Old Oak, for ten seconds |
+| Gift | a finished datacentre, free, owned by the god's faction | free compute | one more machine drinking the water and killing the ground under it |
+| Strike | lands 3 s after it's called, radius 2.3: stock destroyed, buildings fall, the ground dies; never the Depot, a World Engine, a player or a ship | ends the furnace smoking a named grove | erases a friend's town |
+
+No good spells and bad spells: the same power is kind or cruel depending on what it lands on, and kind to the players is usually cruel to the world. Each world renames them (Seed / Lightning / Fair wind / Still air on Earth; Buried spring / Meteor / Thin air / Dust calm on Mars; Kindle / Flare / Updraft / Eclipse at the Sun; Comet / Collision / Slipstream / Radio silence in the Solar System; New star / Supernova / Fair current / Dark in the Universe) and adds one twist: Earth's Seed restores the tile and lifts its neighbours; Mars's Thin air runs machines as if under a Dome; at the Sun a Flare adds 15 heat and an Eclipse sheds 15; the Solar System's Slipstream links machines to the Depot; and a Supernova takes back its god's own vote to stop.
+
+The god is drawn 1.4× larger, hovering with a soft shadow, a halo and the word "god", with a mark for each world (a robe on Earth, a gold visor on Mars, a corona at the Sun, six moons in the Solar System, one open eye in the Universe). The halo tells on you: a whole ring with drifting petals for someone who has mostly given, a ring broken in two trailing embers for someone who has mostly taken. The roster shows each god's stock sown and destroyed; the ending lists, per god, what they sowed, destroyed, felled, gifted, the harvests made under their Bless and the seconds of Hush, and in cosmos each faction's measure against its par. No adjective, no score, no winner.
 
 ## Multiplayer rules
 
-- Natural stock and the stockpile are communal; packs and tools are individual; buildings are owned for recognition and permission; stats (harvested, built, helped) are individual and shown at the end.
+- In classic, natural stock and the stockpile are communal; in cosmos each faction has its own stockpile per world. Packs and tools are individual; buildings are owned for recognition and permission; stats (harvested, built, helped) are individual and shown at the end.
 - Cooperation is mechanical, not just social: several players pressing `E` beside a site raise it faster, and dividing work (one gathers ice while another builds domes) is the only way the dependent stages flow.
 - Tension is built in: the shared stockpile lets one player's furnace burn the grove another player named.
 - The host is whoever created the room, or the longest-connected player when the host is away. The host can take down anyone's building and render down World Engines.

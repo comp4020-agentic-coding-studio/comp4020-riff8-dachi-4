@@ -43,6 +43,7 @@ Plenty is a multiplayer game: one Node process (`server/`) owns every room's sim
 - Make or lose natural stock off the books. Every family keeps `initial = remaining + extracted + destroyed`, and `ledgerHolds` must stay true on every tick. Inventories are whole numbers and never negative. Salvage stays strictly below cost.
 - Leave a deposit unreachable. Buildings can't cover a deposit with stock left, and nothing blocks movement; keep both true or replace them with another guarantee.
 - Advance a world without its players, or wipe a finished campaign. Empty rooms pause ([ADR 0001](docs/adr/0001-empty-rooms-pause.md)); the ending is permanent and a new campaign is a new room.
+  In cosmos, worlds with nobody on them run while any human is in the room; the room pauses when none is ([ADR 0002](docs/adr/0002-worlds-run-unattended.md)).
 - Accept a write or a WebSocket from another origin, or render user text as anything but text (React children, `textContent`, `fillText`).
 
 ## What a change must not break

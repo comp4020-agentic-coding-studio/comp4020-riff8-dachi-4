@@ -1186,6 +1186,28 @@ describe("a god across the cosmos", () => {
     expect(dc.status).not.toMatch(/dome/);
   });
 
+  it("the Solar System's Slipstream links machines to the Depot while it lasts", () => {
+    const { s, ch } = godRoom(["a", "b"], "cosmos");
+    const god = untilGod(s, ch, "a");
+    const si = s.worlds.findIndex((w) => STAGES[w.stage].id === "system");
+    const w = s.worlds[si];
+    // a miner beside a deposit far from the Depot and any relay
+    const depot = w.buildings.find((b) => b.type === "depot")!;
+    const far = w.tiles.findIndex((t, i) => t.d && t.amt > 0 && Math.max(Math.abs((i % w.w) - depot.x), Math.abs(Math.floor(i / w.w) - depot.y)) > 9);
+    const [dx, dy] = [far % w.w, Math.floor(far / w.w)];
+    const spot = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([a, b]) => [dx + a, dy + b]).find(([x, y]) => !placementProblem(s, w, "extractor", x, y, { free: true }))!;
+    w.buildings.push({ id: w.nextBuildingId++, type: "extractor", x: spot[0], y: spot[1], owner: "a", f: "foundry", work: 30, status: "ok" });
+    w.tiles[spot[1] * w.w + spot[0]].b = w.nextBuildingId - 1;
+    w.buildings.push({ id: w.nextBuildingId++, type: "engine", x: 0, y: 0, owner: null, work: 0, status: "ok" });
+    s.reserve = 1000;
+    const miner = w.buildings.find((b) => b.type === "extractor" && b.owner === "a")!;
+    for (let k = 0; k < 12; k++) tick(s, ch);
+    expect(miner.status).toMatch(/not linked/);
+    act(s, ch, god, { k: "god", power: "bless", x: spot[0], y: spot[1], world: si });
+    for (let k = 0; k < 12; k++) tick(s, ch);
+    expect(miner.status).not.toMatch(/not linked/);
+  });
+
   it("the Universe's Supernova takes back the god's own vote; Sow and Hush don't", () => {
     const { s, ch } = godRoom(["a", "b"], "cosmos");
     for (const w of s.worlds.slice(0, 4)) w.spent = true;

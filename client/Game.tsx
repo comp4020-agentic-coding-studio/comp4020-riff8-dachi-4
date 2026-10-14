@@ -1331,7 +1331,9 @@ function Transition({ s }: { s: Snapshot }): ReactNode {
 
 function Ending({ s }: { s: Snapshot }): ReactNode {
   const total = s.history.reduce((a, h) => a + FAMILIES.reduce((b, f) => b + h.ledger[f].extracted + h.ledger[f].destroyed, 0), 0);
-  const humans = Object.values(s.players).filter((p) => !p.bot);
+  // hands are the people who took, built or helped: a browser that only watched isn't one
+  const did = (p: Player): boolean => p.stats.harvested + p.stats.built + p.stats.helped > 0 || p.god.turns > 0;
+  const humans = Object.values(s.players).filter((p) => !p.bot && did(p));
   const [busy, setBusy] = useState(false);
   const [hidden, setHidden] = useState(false);
   if (hidden)
@@ -1375,7 +1377,7 @@ function Ending({ s }: { s: Snapshot }): ReactNode {
         </ul>
         <h3>Who did it</h3>
         <ul>
-          {Object.values(s.players).filter((p) => !p.bot || p.stats.harvested || p.stats.built).map((p) => (
+          {Object.values(s.players).filter(did).map((p) => (
             <li key={p.id}>
               {p.faction ? <Badge f={p.faction} /> : null}
               {p.name}

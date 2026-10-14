@@ -2137,11 +2137,132 @@ deliverable built on this same Vite/TS static template:
   complements rather than replaces the live browser sweep. Mutation-check
   each such test against a deliberately broken rebuilt image before keeping
   it.
+- **Before adding a broadcast (SSE/WebSocket) to an existing app, audit what
+  its JSON already publishes.** A live stream pushes that same shape to every
+  open tab. `comp4020-final-dachi`'s `/api/marks` had published every
+  stroke's `hand` cookie value (a bearer identity) since crit 8, through 18
+  runs of header and boundary checks that only looked at requests and
+  response *headers*, never at response *bodies*. Its own spec even read
+  "someone else's hand" out of the listing. Send derived per-requester facts
+  (`yours: boolean`), never the token.
+- **`node:http` doesn't send response headers until the first body write.**
+  An SSE route that calls `writeHead` and then waits for events leaves the
+  client's `EventSource` unopened (no `open` event, `fetch` unresolved) until
+  something is written, which could be a 25s heartbeat. Write an initial
+  frame (`retry: 3000`) or call `flushHeaders()`. Found because a mutation
+  check failed at 5s instead of 1s; give the test's stream reader a timeout
+  on headers too.
+- **Real-time own-echo race:** a stream opened before a first-time visitor's
+  identity cookie existed delivers their own first post as someone else's,
+  and in Chrome the stream copy usually beats the POST response. jsdom over
+  localhost hides this (the response always wins), so force the bad order in
+  the test by holding the POST response back. More generally, when parallel
+  spec files share one running app, stream tests must assert properties (ids
+  ascending, all past the resume point), never exact event sequences.
+- **A boolean "my request is in flight" flag that suppresses one thing (here,
+  announcing your own stroke) also suppresses everything else that arrives in
+  the same window.** Hold the arrivals and filter them once the response says
+  which one was yours. Cold starts on an auto-stopping Fly machine stretch
+  that window to seconds. To test it, hold the response back and post as a
+  second hand meanwhile. Fly's proxy keeps an idle SSE stream open as long as
+  a 25s heartbeat keeps arriving (checked for 80s).
+- **Any per-request "in flight" state needs a re-entry guard: ask what a
+  second submit does before the first answers.** On the final project the
+  held-arrivals list was reset by a second submit and nulled under it, so a
+  double click posted twice to an append-only store, split a first-time
+  visitor across two hands (neither post carried a cookie yet), and threw.
+  Guard the handler on the same state, and keep every await that can reject
+  (including `res.json()`) inside the try so the state can't get stuck set.
+  Test it by clicking twice against a held-back response. An in-flight guard
+  alone isn't enough: a warm server answers in milliseconds, faster than a
+  human double-click (100--250ms), so the second click submits the cleared
+  form. Keep submits ignored for a short settle (1s) after success. CDP
+  `agent-browser dblclick` fires both clicks microseconds apart and hides
+  this; test with two `click()`s 150ms apart via `eval`.
+- **Read every client error message against what the real form can actually
+  send.** If the form's own constraint (maxlength, a fixed radio set) means
+  the validation error can never happen, then the message attached to it is
+  the one visitors see for every *other* failure (5xx, a proxy refusing a cold
+  start), and it gives wrong advice. Branch the copy on the server's own error
+  reason, not on `!res.ok`. Found on the final project, and tested by having
+  the page's stubbed fetch answer the POST with a 502.
+- **An SSE heartbeat sent as a comment line (`: ping`) keeps proxies open but
+  is invisible to `EventSource`, so the page can't tell a quiet stream from a
+  dead one.** A half-open connection (a phone waking on a socket the server
+  already dropped) stays OPEN with nothing arriving, so the page keeps saying
+  "live". Send the heartbeat as an event (`event: ping\ndata:\n\n`; an empty
+  `data:` line still dispatches) and reopen any stream silent for two
+  intervals, checking on a timer and on `visibilitychange`. To test it in
+  jsdom, override the window's `Date.now` and dispatch `visibilitychange`
+  with `document.hidden` redefined; no fake timers needed.
+- **Drive the 320px reflow check with worst-case user content, not just the
+  page as it loads.** On the final project a note that was one unbroken run
+  (a pasted URL, within the form's own 140-char limit) widened the page to
+  913px, because a flex item's default `min-width: auto` stops it shrinking
+  below its longest word. axe saw nothing. Post the longest unbroken value
+  the form allows, then read `scrollWidth`; fix with `min-width: 0;
+  overflow-wrap: anywhere` on the text.
+- **A visually hidden live region can give screen-reader users a signal
+  sighted users never get.** If what it announces happens out of view (on the
+  final project, new strokes landed ~1.5 phone screens below the first view),
+  show the announcement as well, and say where the thing went. axe can't see
+  this; compare what each kind of visitor perceives at the top of the page.
+- When CI fails at a step whose logs need auth (no `gh` here), first push the
+  next real commit before chasing it: on the final project three red
+  docker-build runs within 11 minutes were transient and the next push went
+  green. A local legacy `docker build` (no buildx here) ignores the
+  Dockerfile's `# syntax` line, so it can't reproduce a BuildKit-only fault
+  anyway. Otherwise check the
+  public jobs API (`/actions/runs/<id>/jobs`) for the failing step. Then
+  reproduce that step with a no-cache build, and use a Fly remote build of the
+  same Dockerfile as a second builder. If both pass, `flyctl deploy` keeps the
+  live app current while CI stays red.
+- `pkill -f <pattern>` run inside a Bash tool call can match that call's own
+  `zsh -c` command line and kill it (exit 144). Use `pgrep -af` and kill the
+  specific pid instead.
 - **Crit 8 of `comp4020-final-dachi` is done: 18 runs, with the final run a
   pure re-verification and no new commit.** Nine real gaps were found, all in
   the hand-rolled `node:http` server's boundary and headers (cookie decoding
   and shape, cookie flags, CSRF, clickjacking, fetch failure) or in README
   claims that `spec/` didn't actually test. The crit-8 well ran dry by about
   run 12, and the remaining runs were light touch. The repo stays the same
-  one through crit 10, so don't treat it as frozen. It goes public at this
-  cutoff, and from crit 9 CI deploys every push.
+  one through crit 10. It's public now, and CI deploys every push to `main`
+  in about a minute; poll the live URL to confirm, since `gh` isn't
+  authenticated here.
+- **To rehearse "several people at once" for real, arm each `agent-browser
+  --session <name>` with a `setTimeout` to one shared wall-clock timestamp**
+  (`T=$(( $(date +%s%3N) + 3000 ))`, then `eval` a `requestSubmit()` delayed
+  by `T - Date.now()` in each session). Sequential CLI calls are hundreds of
+  ms apart and never collide. Separate sessions have separate cookie jars, so
+  they really are different visitors. On the final project both tabs agreed
+  on order and ownership. The rehearsal also showed that copy about the past
+  ("you've left a mark before") had been recomputed on every live update.
+  Derive "before this visit" state at load only.
+- **A per-connection identity fixed when a stream opens goes stale for every
+  tab that opened before the identity existed.** Two sessions with separate
+  cookie jars never show it; two tabs of one fresh session do (each labelled
+  the other's strokes a stranger's on the final project). Fix client-side: the
+  tab whose post sets the identity tells its siblings on a `BroadcastChannel`.
+  Test in jsdom by giving two pages one shared cookie jar and Node's own
+  `BroadcastChannel` on `window`.
+- **Measure SSE capacity before a crit instead of trusting Fly defaults.**
+  `fly.toml` with no `concurrency` block means `connections`, soft limit 20,
+  and no hard limit, so one machine doesn't refuse a room of tabs. On the
+  final project, 500 open streams cost about 9MB under a 256MB limit. Run
+  the open-N-streams check with a Node script that aborts its own fetches,
+  and use `?after=<huge id>` so no history gets replayed.
+- **Crit 9 of `comp4020-final-dachi` is done: about 17 runs, final run pure
+  re-verification with no new commit.** The real finds were all client-side
+  real-time races and copy (in-flight announcements, double submit, silent
+  half-open streams, sibling-tab identity, out-of-view arrivals), found by
+  forcing event order in jsdom rather than trusting localhost timing. The
+  well ran dry around run 12, as on crit 8.
+- **Crit 10 (logs say who did what): name a person in a log line by a short
+  hash of their identity cookie, never the cookie itself.** A bearer token
+  read out on a projector is leaked. Mint the identity on first page load,
+  not first write, so idle visitors are already distinct. JSON-quote free
+  text so a note with a newline can't forge a line. To test logging, spawn a
+  dedicated server in the spec and read its stdout, since the shared CI app's
+  stdout isn't visible. Mutation-check by making the tag return the raw
+  cookie. A spec's own readiness `fetch(origin)` also counts as a visit, so
+  assert on the last N log lines, not all of them.

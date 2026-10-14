@@ -150,7 +150,7 @@ A cosmos room with gods, rapid preset, one browser at 1280×720 beside the four 
 - **Human playtesting**: everything above is bots and a scripted browser.
 - **An ordinary laptop**: see performance.
 - **Mobile and touch**: renders, isn't playable.
-- **Not verified in a browser**: a full cosmos campaign to its ending with humans; a landing (seen only in the server test and the sim tests); the Slipstream twist on the Solar System (the code path exists, there's no test); the sounds (no audio device here); reduced motion on the god's bob and the map's pulses (the code uses the existing setting); the ending card's per-faction lines.
+- **Not verified in a browser**: a cosmos campaign with several real people (one browser and scripted players only); the sounds (no audio device here); reduced motion on the god's bob and the map's pulses (the code uses the existing setting); the ending card's per-faction lines.
 - **The lopsided balance band**: see the tournament.
 - **The Docker image** wasn't built or run in this run; CI does that.
 

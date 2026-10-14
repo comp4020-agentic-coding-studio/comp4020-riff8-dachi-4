@@ -154,3 +154,6 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
 .launch label, .inspect label { display: flex; justify-content: space-between; margin: 0.15rem 0; }
 .launch input[type="number"], .inspect input[type="number"] { width: 4.5rem; }
 .flight { position: absolute; top: 40%; left: 50%; transform: translateX(-50%); background: var(--paper); border: 2px solid var(--line); border-radius: 12px; padding: 0.5rem 0.8rem; }
+/* the orbital map is a pull-back: the side panels step aside while it's open */
+.game.mapping .col-left > :not(.chips):not(.host-switch), .game.mapping .factions-panel, .game.mapping .bottom, .game.mapping .log,
+.game.mapping .corner-buttons, .game.mapping .inspect { display: none; }

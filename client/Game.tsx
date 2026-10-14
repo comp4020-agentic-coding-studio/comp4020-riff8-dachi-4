@@ -465,7 +465,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
   const needCards = !!(s && me && s.mode === "cosmos" && !me.faction && s.phase.k === "play");
 
   return (
-    <main className="game">
+    <main className={`game ${view.map && s?.mode === "cosmos" ? "mapping" : ""}`}>
       <h1 className="sr-only">{st ? `Plenty: ${st.name}, room ${room}` : "Plenty"}</h1>
       <canvas
         ref={canvasRef}
@@ -505,7 +505,7 @@ export default function Game({ room, name }: { room: string; name: string }): Re
           <RoomPanel s={s} client={client} host={host} />
           {s.mode === "cosmos" && <FactionPanel s={s} />}
           {isGod && bar === "powers" ? (
-            <PowersBar s={s} view={view} sowing={sowing} onSow={() => setSowing((v) => !v)} onPower={chooseGod} onFlip={() => setBar("build")} />
+            <PowersBar s={s} you={client.you} view={view} sowing={sowing} onSow={() => setSowing((v) => !v)} onPower={chooseGod} onFlip={() => setBar("build")} />
           ) : (
             <BuildBar s={s} me={me} view={view} onWorld={onWorld} onPick={chooseBuild} onTool={setTool} god={isGod} onFlip={() => setBar("powers")} />
           )}
@@ -751,7 +751,7 @@ function GodLine({ s, you }: { s: Snapshot; you: string }): ReactNode {
 }
 
 /** The god's bar: five powers in this world's names, keys 1-5. */
-function PowersBar({ s, view, sowing, onSow, onPower, onFlip }: { s: Snapshot; view: View; sowing: boolean; onSow: () => void; onPower: (p: GodPower, f?: Family) => void; onFlip: () => void }): ReactNode {
+function PowersBar({ s, you, view, sowing, onSow, onPower, onFlip }: { s: Snapshot; you: string; view: View; sowing: boolean; onSow: () => void; onPower: (p: GodPower, f?: Family) => void; onFlip: () => void }): ReactNode {
   const st = STAGES[s.stage];
   const blurb: Record<GodPower, string> = {
     sow: "A full new deposit on an empty tile",
@@ -762,7 +762,7 @@ function PowersBar({ s, view, sowing, onSow, onPower, onFlip }: { s: Snapshot; v
   };
   const on = (p: GodPower): boolean => view.tool === "god" && view.god?.power === p;
   const hover = view.hover;
-  const preview = view.tool === "god" && view.god && hover ? godPreview(s, view.god, hover[0], hover[1], "") : null;
+  const preview = view.tool === "god" && view.god && hover ? godPreview(s, view.god, hover[0], hover[1], you) : null;
   return (
     <div className="panel bottom powers-bar" role="toolbar" aria-label="God powers">
       {s.mode === "cosmos" && (
@@ -871,7 +871,8 @@ function asRoom(s: Snapshot): Parameters<typeof measureText>[0] {
 
 /** What you carry and the tools you've made: yours alone, unlike the stockpile below it. */
 function Pack({ s, me, onCraft, onDeposit }: { s: Snapshot; me: Player; onCraft: (f: Family) => void; onDeposit: () => void }): ReactNode {
-  const st = STAGES[s.stage];
+  // what you carry is named for the world you stand on, whichever one you're looking at
+  const st = STAGES[s.mode === "cosmos" && me.world >= 0 ? (s.summaries[me.world]?.stage ?? s.stage) : s.stage];
   const empty = FAMILIES.every((f) => me.pack[f] === 0);
   const secs = (ticks: number): string => `${(ticks * TICK_MS) / 1000}s`;
   return (
@@ -894,7 +895,7 @@ function Pack({ s, me, onCraft, onDeposit }: { s: Snapshot; me: Player; onCraft:
           const tier = me.tools[f];
           const next = TOOL_TIERS[tier + 1];
           const cost = next ? toolCost(f, tier + 1) : null;
-          const problem = next ? craftProblem(s, me, f) : null;
+          const problem = next ? craftProblem(me.world === s.viewing ? W(s) : { buildings: [], stage: st === STAGES[s.stage] ? s.stage : STAGES.indexOf(st) }, me, f) : null;
           return (
             <li key={f}>
               <span>
